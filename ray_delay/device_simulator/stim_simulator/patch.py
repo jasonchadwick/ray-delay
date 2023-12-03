@@ -264,7 +264,7 @@ class SurfaceCodePatch():
                 else:
                     if d.idx in self.qubits_to_highlight:
                         output += color.GRNHB
-                        if type(d) is MeasureQubit:
+                        if isinstance(d, MeasureQubit):
                             output += f'{d.basis}{d.idx:3d}'
                         else:
                             if d in self.logical_z_qubits:
@@ -273,7 +273,7 @@ class SurfaceCodePatch():
                                 output += f'{d.idx:4d}'
                         output += color.END + '|'
                     else:
-                        if type(d) is MeasureQubit:
+                        if isinstance(d, MeasureQubit):
                             if d.basis == 'X':
                                 c = color.BLU
                             else:

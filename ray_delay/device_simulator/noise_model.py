@@ -100,7 +100,7 @@ class NoiseModel:
         """
         self.num_qubits = len(patch.all_qubits)
         self.qubit_pairs = patch.qubit_pairs
-        self.qubit_layout = np.array([[(q.idx if q is not None else -1) for q in row] for row in patch.device], int)
+        self.qubit_layout: NDArray[np.int_] = np.array([[(q.idx if q is not None else -1) for q in row] for row in patch.device], int)
         self.noise_params = noise_params
 
         self.error_max_vals = {
@@ -236,6 +236,7 @@ class NoiseModel:
                     and coords[1]+c_offset >= 0
                     and coords[1]+c_offset < self.qubit_layout.shape[1]):
                     qubit = self.qubit_layout[coords[0]+r_offset, coords[1]+c_offset]
+                    assert isinstance(qubit, int)
                     if qubit >= 0 and qubit != center_qubit:
                         qubits.append(qubit)
         return qubits

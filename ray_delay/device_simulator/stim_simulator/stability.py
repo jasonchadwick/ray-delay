@@ -122,7 +122,7 @@ class StabilityPatch(SurfaceCodePatch):
             deterministic_detectors=[q.idx for q in self.observable_ancilla], 
             inactive_detectors=[q.idx for q in self.boundary_basis_ancilla],
         )
-        circ.append(stim.CircuitRepeatBlock(self.num_rounds - 1, self.syndrome_round(stim.Circuit())))
+        circ.append(stim.CircuitRepeatBlock(self.dm - 1, self.syndrome_round(stim.Circuit())))
 
         # Measure in basis opposite of boundary basis
         self.reset_meas_qubits(circ, 'M', [data.idx for data in self.data])

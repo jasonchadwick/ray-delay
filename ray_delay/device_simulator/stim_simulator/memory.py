@@ -1,11 +1,13 @@
 import stim
-from .patch import SurfaceCodePatch, DataQubit, MeasureQubit
+from ray_delay.device_simulator.stim_simulator.patch import SurfaceCodePatch, DataQubit, MeasureQubit
 
 class MemoryPatch(SurfaceCodePatch):
     """Surface code patch that performs the memory experiment."""
     def __init__(
             self, 
-            d: int, 
+            dx: int,
+            dz: int,
+            dm: int,
             *args,
             **kwargs,
         ) -> None:
@@ -17,8 +19,7 @@ class MemoryPatch(SurfaceCodePatch):
             gate2_time: Duration of two-qubit gates.
             mr_time: Duration of readout+reset.
         """
-        super().__init__(d, *args, **kwargs)
-        self.num_rounds = d
+        super().__init__(dx, dz, dm, *args, **kwargs)
 
     def get_stim(
             self, 
@@ -67,7 +68,7 @@ class MemoryPatch(SurfaceCodePatch):
             inactive_detectors=[a.idx for a in self.ancilla 
                                 if a not in observable_ancilla],
         )
-        circ.append(stim.CircuitRepeatBlock(self.num_rounds - 1, self.syndrome_round(stim.Circuit())))
+        circ.append(stim.CircuitRepeatBlock(self.dm - 1, self.syndrome_round(stim.Circuit())))
 
         if ideal_init_and_meas:
             self.measure_ideal(circ, observable_basis, add_observable=True)

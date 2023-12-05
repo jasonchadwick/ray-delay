@@ -39,7 +39,7 @@ class DataQubit(Qubit):
 class MeasureQubit(Qubit):
     """Ancilla qubit used to perform stabilizer measurements.
     """
-    def __init__(self, idx: int, coords: tuple[int, int], data_qubits: list[Qubit | None], basis: str) -> None:
+    def __init__(self, idx: int, coords: tuple[int, int], data_qubits: list[DataQubit | None], basis: str) -> None:
         """Initialize.
         
         Args:
@@ -48,8 +48,8 @@ class MeasureQubit(Qubit):
             data_qubits: List of data qubits that this qubit measures.
         """
         super().__init__(idx, coords)
-        self.data_qubits: list[Qubit | None] = data_qubits
-        self.basis: str = basis
+        self.data_qubits = data_qubits
+        self.basis = basis
 
     def __repr__(self):
         return f'{self.idx}, Coords: {self.coords}, Basis: {self.basis}, Data Qubits: {self.data_qubits}'
@@ -63,7 +63,9 @@ class SurfaceCodePatch():
     """
     def __init__(
             self, 
-            d: int, 
+            dx: int,
+            dz: int,
+            dm: int,
             gate1_time: float = 25e-9, 
             gate2_time: float = 34e-9, 
             mr_time: float = 500e-9, 
@@ -73,7 +75,9 @@ class SurfaceCodePatch():
         """Initializes the instance based on spam preference.
 
         Args:
-            d: Distance of code.
+            dx: X distance of code (~ number of rows of qubits).
+            dz: Z distance of code (~ number of columns of qubits).
+            dm: Temporal distance of code (= number of rounds of measurement). 
             gate1_time: duration of single-qubit gates.
             gate2_time: duration of two-qubit gates.
             mr_time: duration of readout and reset.
@@ -82,11 +86,15 @@ class SurfaceCodePatch():
             save_stim_circuit: If True, save each Stim circuit for quick
                 querying (if noise models have not changed since last time).
         """
-        self.d = d
-        self.num_rounds = d
+        self.dx = dx
+        self.dz = dz
+        self.dm = dm
 
         self.device: list[list[Qubit | None]] = [
-            [None for _ in range(2*self.d+1)] for _ in range(2*self.d+1)]
+            [None for _ in range(2*self.dz+1)] for _ in range(2*self.dx+1)]
+        
+        assert len(self.device) == 2*dx+1
+        assert len(self.device[0]) == 2*dz+1
 
         self.data = self.place_data()
 
@@ -98,6 +106,7 @@ class SurfaceCodePatch():
 
         self.ancilla = self.x_ancilla + self.z_ancilla
         self.all_qubits: list[DataQubit | MeasureQubit] = self.ancilla + self.data
+        assert len(self.all_qubits) == 2*(dx*dz)-1
         self.qubit_name_dict = {q.idx:q for q in self.all_qubits}
 
         self.error_vals: dict[str, dict[int | tuple[int, int], float]] = {
@@ -187,12 +196,31 @@ class SurfaceCodePatch():
             list of DataQubit objects.
         """
         data: list[DataQubit] = [
-            DataQubit((self.d*x + y), (2*x+1, 2*y+1)) 
-            for x in range(self.d) for y in range(self.d)]
+            DataQubit((self.dz*row + col), (2*row+1, 2*col+1)) 
+            for col in range(self.dz) for row in range(self.dx)]
         
         for data_qubit in data:
             self.device[data_qubit.coords[0]][data_qubit.coords[1]] = data_qubit
         return data
+
+    def _get_neighboring_data_qubits(self, coords: tuple[int, int]) -> list[DataQubit | None]:
+        """TODO
+        """
+        offsets = np.array([[-1, -1], [-1, +1], [+1, -1], [+1, +1]])
+        qubits = []
+        for offset in offsets:
+            new_coords = (coords[0] + offset[0], coords[1] + offset[1])
+            if (new_coords[0] > 0 and new_coords[0] < len(self.device)
+                and new_coords[1] > 0 and new_coords[1] < len(self.device[0])):
+                q = self.device[new_coords[0]][new_coords[1]]
+                if isinstance(q, DataQubit):
+                    qubits.append(q)
+                else:
+                    qubits.append(None)
+            else:
+                qubits.append(None)
+            
+        return qubits
 
     def place_ancilla(self) -> None:
         """Place ancilla (non-data) qubits in the patch. Must be run *after*
@@ -203,34 +231,21 @@ class SurfaceCodePatch():
 
         self.x_ancilla: list[MeasureQubit] = []
         self.z_ancilla: list[MeasureQubit] = []
-        for x in range(self.d+1):
-            for y in range(self.d+1):
-                if (x + y) % 2 == 1 and y != 0 and y != self.d: # X basis
-                    coords = (2*x, 2*y)
-                    data_qubits: list[Qubit | None] = []
-                    if x == 0: # Top Edge
-                        data_qubits = [None, None, self.device[coords[0] + 1][coords[1] - 1], self.device[coords[0] + 1][coords[1] + 1]]
-                    elif x == self.d: # Bottom Edge
-                        data_qubits = [self.device[coords[0] - 1][coords[1] - 1], self.device[coords[0] - 1][coords[1] + 1], None, None]
-                    elif x > 0 and y > 0 and x < self.d and y < self.d: # in the middle
-                        data_qubits = [self.device[coords[0] - 1][coords[1] - 1], self.device[coords[0] - 1][coords[1] + 1], self.device[coords[0] + 1][coords[1] - 1], self.device[coords[0] + 1][coords[1] + 1]]
-                    else:
-                        # Empty position
+        for row in range(self.dx+1):
+            for col in range(self.dz+1):
+                if (row + col) % 2 == 1 and col != 0 and col != self.dz: # X basis
+                    coords = (2*row, 2*col)
+                    data_qubits = self._get_neighboring_data_qubits(coords)
+                    if all(q is None for q in data_qubits):
                         continue
                     measure_q = MeasureQubit(q_count, coords, data_qubits, 'X')
                     self.device[coords[0]][coords[1]] = measure_q
                     self.x_ancilla.append(measure_q)
                     q_count += 1
-                elif (x + y) % 2 == 0 and x != 0 and x != self.d: # Z basis
-                    coords = (2*x, 2*y)
-                    if y == 0: # Left edge
-                        data_qubits = [None, self.device[coords[0] - 1][coords[1] + 1], None, self.device[coords[0] + 1][coords[1] + 1]]
-                    elif y == self.d: # Right edge
-                        data_qubits = [self.device[coords[0] - 1][coords[1] - 1], None, self.device[coords[0] + 1][coords[1] - 1], None]
-                    elif x > 0 and y > 0 and x < self.d and y < self.d: # in the middle
-                        data_qubits = [self.device[coords[0] - 1][coords[1] - 1], self.device[coords[0] - 1][coords[1] + 1], self.device[coords[0] + 1][coords[1] - 1], self.device[coords[0] + 1][coords[1] + 1]]
-                    else:
-                        # Empty position
+                elif (row + col) % 2 == 0 and row != 0 and row != self.dx: # Z basis
+                    coords = (2*row, 2*col)
+                    data_qubits = self._get_neighboring_data_qubits(coords)
+                    if all(q is None for q in data_qubits):
                         continue
                     measure_q = MeasureQubit(q_count, coords, data_qubits, 'Z')
                     self.device[coords[0]][coords[1]] = measure_q
@@ -248,9 +263,9 @@ class SurfaceCodePatch():
                 yields the Z observable.
         """
         logical_z_qubits: set[DataQubit] = {
-            q for q in self.data if q.coords[0] == self.d}
+            q for q in self.data if q.coords[0] == self.dx}
         logical_x_qubits: set[DataQubit] = {
-            q for q in self.data if q.coords[1] == self.d}
+            q for q in self.data if q.coords[1] == self.dz}
         return logical_x_qubits, logical_z_qubits
 
     def __repr__(self) -> str:
@@ -293,8 +308,8 @@ class SurfaceCodePatch():
                 output += '-' * 2
                 topleft = self.device[i][j]
                 topright = None if j >= len(self.device[0])-1 else self.device[i][j+1]
-                botleft = None if i >= len(self.device[0])-1 else self.device[i+1][j]
-                botright = None if i >= len(self.device[0])-1 or j >= len(self.device[0])-1 else self.device[i+1][j+1]
+                botleft = None if i >= len(self.device)-1 else self.device[i+1][j]
+                botright = None if i >= len(self.device)-1 or j >= len(self.device[0])-1 else self.device[i+1][j+1]
 
                 if topleft is not None and botright is not None:
                     q0 = topleft.idx
@@ -616,6 +631,8 @@ class SurfaceCodePatch():
         ) -> None:
         """Applies idle errors based on duration t and preconfigured qubit T1
         and T2 times.
+
+        TODO: maybe do not apply idle errors on qubits that have just been reset?
 
         Args:
             circ: Stim circuit to append to.
@@ -974,6 +991,7 @@ class SurfaceCodePatch():
             detector_error_model: stim.DetectorErrorModel | None = None,
             use_sinter: bool = True,
             num_workers: int = 6,
+            **stim_kwargs,
         ) -> tuple[float, int]:
         """Simulate the Stim circuit and calculate the empirical logical error
         rate.
@@ -997,7 +1015,7 @@ class SurfaceCodePatch():
             stdev: Standard deviation of observed rate.
             completed_shots: Number of simulation shots completed.
         """
-        circuit = self.get_stim()
+        circuit = self.get_stim(**stim_kwargs)
         if detector_error_model is None:
             detector_error_model = circuit.detector_error_model(approximate_disjoint_errors=True)
 
@@ -1104,14 +1122,14 @@ class SurfaceCodePatch():
         if only_intermediate_detectors:
             detector_round_indices = np.array(list(circuit.get_detector_coordinates().values()))[:,2]
             init_detector_count = np.sum(detector_round_indices == 0)
-            final_detector_count = np.sum(detector_round_indices == self.num_rounds)
+            final_detector_count = np.sum(detector_round_indices == self.dm)
             intermediate_detector_count = len(detector_round_indices) - init_detector_count - final_detector_count
-            detectors_per_round = intermediate_detector_count // (self.num_rounds-1)
-            assert(intermediate_detector_count % (self.num_rounds-1) == 0)
+            detectors_per_round = intermediate_detector_count // (self.dm-1)
+            assert(intermediate_detector_count % (self.dm-1) == 0)
 
-            fractions = np.reshape(fractions[init_detector_count : num_detectors-final_detector_count], (self.num_rounds-1, detectors_per_round))
-            stdevs = np.reshape(stdevs[init_detector_count : num_detectors-final_detector_count], (self.num_rounds-1, detectors_per_round))
-            samples = np.reshape(samples[:, init_detector_count : num_detectors-final_detector_count], (completed_shots, self.num_rounds-1, detectors_per_round))
+            fractions = np.reshape(fractions[init_detector_count : num_detectors-final_detector_count], (self.dm-1, detectors_per_round))
+            stdevs = np.reshape(stdevs[init_detector_count : num_detectors-final_detector_count], (self.dm-1, detectors_per_round))
+            samples = np.reshape(samples[:, init_detector_count : num_detectors-final_detector_count], (completed_shots, self.dm-1, detectors_per_round))
 
         if return_full_data:
             return fractions, stdevs, completed_shots, samples

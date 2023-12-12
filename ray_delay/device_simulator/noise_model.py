@@ -35,11 +35,11 @@ class NoiseParams:
 
 StandardIdenticalNoiseParams = NoiseParams(
     {
-        'T1':1000e-6, 
-        'T2':1000e-6, 
-        'gate1_err':-4, 
-        'gate2_err':-3, 
-        'readout_err':-3
+        'T1':2000e-6, 
+        'T2':2000e-6, 
+        'gate1_err':-5, 
+        'gate2_err':-4, 
+        'readout_err':-4
     },
 )
 
@@ -128,6 +128,10 @@ class NoiseModel:
 
     def reseed(self, seed: int):
         self.rng = np.random.default_rng(seed)
+
+    def reset(self):
+        self.active_cosmic_rays = []
+        self.error_val_history = []
 
     def step(
             self, 
@@ -235,8 +239,7 @@ class NoiseModel:
                     and coords[0]+r_offset < self.qubit_layout.shape[0]
                     and coords[1]+c_offset >= 0
                     and coords[1]+c_offset < self.qubit_layout.shape[1]):
-                    qubit = self.qubit_layout[coords[0]+r_offset, coords[1]+c_offset]
-                    assert isinstance(qubit, int)
+                    qubit = int(self.qubit_layout[coords[0]+r_offset, coords[1]+c_offset])
                     if qubit >= 0 and qubit != center_qubit:
                         qubits.append(qubit)
         return qubits

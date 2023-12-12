@@ -10,10 +10,14 @@ Features:
 """
 
 import numpy as np
+from numpy.typing import NDArray
+import matplotlib.pyplot as plt
+import matplotlib as mpl
 import stim
 import sinter
 import pymatching
 from itertools import product, chain, combinations
+import qc_utils.matplotlib_setup as mpl_setup
 
 class Qubit():
     """A single physical qubit on a device.
@@ -651,7 +655,7 @@ class SurfaceCodePatch():
             p_y = p_x
             p_z = max(0, 0.5 * (1 - np.exp(-t*1.0 / self.error_vals['T2'][q])) - p_x)
             if self.consider_correlations:
-                self.apply_exclusive_errors(circ, [q], ['X','Y','Z'], [p_x, p_y, p_z], cutoff=self.probability_cutoff)
+                self.apply_exclusive_errors(circ, [q], ['X','Y','Z'], [p_x, p_y, p_z])
             else:
                 circ.append('PAULI_CHANNEL_1', [q], (p_x, p_y, p_z))
         
@@ -793,6 +797,32 @@ class SurfaceCodePatch():
             self.apply_idle(circ, time, non_idle_qubits=qubits)
             circ.append('TICK')
 
+    def meas_ideal(
+            self,
+            circ: stim.Circuit,
+            op: str,
+            qubits: list[int],
+        ) -> None:
+        """Applies ideal M or MX operation to qubits.
+        
+        Args:
+            circ: Stim circuit to append to.
+            op: Measure/reset op to apply, such as 'M' or 'MX'.
+            qubits: List of qubits to apply the operation to.    
+        """
+        for qubit in qubits:
+            circ.append(op, qubit)
+
+        # Update measurement record indices
+        meas_round = {}
+        for i in range(len(qubits)):
+            q = qubits[-(i + 1)]
+            meas_round[q] = -(i + 1)
+        for round in self.meas_record:
+            for q, idx in round.items():
+                round[q] = idx - len(qubits)
+        self.meas_record.append(meas_round)
+
     def get_meas_rec(
             self, 
             round_idx: int, 
@@ -821,7 +851,7 @@ class SurfaceCodePatch():
         all_qubits = [q.idx for q in self.all_qubits]
         data_qubits = [q.idx for q in self.data]
 
-        circ.append('RZ', all_qubits)
+        circ.append('R', all_qubits)
 
         if state == '0':
             return
@@ -841,8 +871,9 @@ class SurfaceCodePatch():
             circ.append('S', data_qubits)
         else:
             raise Exception(f'Initialization state "{state}" not supported')
+        circ.append('TICK')
 
-    def measure_ideal(
+    def measure_logical_operator_ideal(
             self, 
             circ: stim.Circuit, 
             basis: str,
@@ -861,6 +892,8 @@ class SurfaceCodePatch():
             add_observable: if True, add an OBSERVABLE to Stim. Otherwise, use a
                 detector instead.
         """
+        raise NotImplementedError
+    
         assert len(self.logical_z_qubits) != 0
         assert len(self.logical_x_qubits) != 0
 
@@ -1134,6 +1167,136 @@ class SurfaceCodePatch():
         if return_full_data:
             return fractions, stdevs, completed_shots, samples
         return fractions, stdevs, completed_shots, None
+
+    def get_syndrome_qubits(
+            self, 
+            only_intermediate_detectors: bool = True, 
+            **stim_kwargs,
+        ):
+        """Get qubits corresponding to detectors in each syndrome round.
+        
+        Args:
+            only_intermediate_detectors: If True, ignore the initial and final
+                detectors and only return counts for mid-circuit detectors. This
+                option also reshapes the returned arrays into shape
+                (self.num_rounds-1, detectors_per_round).
+            stim_kwargs: Arguments to pass on to self.get_stim().
+        """
+        detector_coords = self.get_stim(**stim_kwargs).get_detector_coordinates()
+        round_1_coords = {det: coords[:2] for det, coords in detector_coords.items() if coords[2] == 1}
+        syndrome_qubits = [None] * len(round_1_coords)
+        min_idx = min(round_1_coords.keys())
+        for det, det_coords in round_1_coords.items():
+            qubit = self.device[int(det_coords[0])][int(det_coords[1])]
+            syndrome_qubits[det - min_idx] = qubit
+        return syndrome_qubits
+
+    def plot_qubit_vals(
+            self,
+            qubit_vals: list[float] | None = None,
+            qubit_colors: list[list[float]] | None = None,
+            ax: plt.Axes | None = None,
+            plot_text: str = 'idx',
+            cmap_name: str = 'viridis',
+            font_size: int = 12,
+            vmin: float | None = None,
+            vmax: float | None = None,
+            norm: mpl.colors.Normalize = mpl.colors.Normalize,
+        ):
+        """Plot qubit values as a heatmap.
+
+        If neither qubit_vals nor qubit_colors are given, plot qubit colors
+        based on data / X ancilla / Z ancilla.
+
+        Args:
+            qubit_vals: Array of qubit values to plot.
+            qubit_colors: Array of colors to plot qubits with. Overrides
+                qubit_vals.
+            ax: Axes to plot on. If None, create new figure.
+            plot_text: If 'idx', plot qubit indices. If 'val', plot qubit vals.
+                If 'none', do not plot text.
+            cmap_name: Name of matplotlib colormap to use.
+            font_size: Font size for text.
+        """
+
+        xlims = (-1, 2*self.dz+2)
+        ylims = (-1, 2*self.dx+2)
+
+        if qubit_vals is not None:
+            min_val = (min(qubit_vals) if vmin is None else vmin)
+            max_val = (max(qubit_vals) if vmin is None else vmax)
+        
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6,6))
+            if qubit_vals is not None:
+                fig.subplots_adjust(right=0.8)
+                cbar_ax = fig.add_axes([0.85, 0.15, 0.02, 0.7])
+                cbar = fig.colorbar(mpl.cm.ScalarMappable(norm=norm(vmin=min_val, vmax=max_val), cmap=cmap_name), cax=cbar_ax)
+        else:
+            fig = ax.get_figure()
+
+        ax.invert_yaxis()
+        ax.set_aspect('equal')
+
+        if qubit_colors is None:
+            if qubit_vals is None:
+                qubit_colors = [None] * len(self.all_qubits)
+                for i,qubit in enumerate(self.all_qubits):
+                    if isinstance(qubit, DataQubit):
+                        qubit_colors[qubit.idx] = [1,1,1,1]
+                    else:
+                        assert isinstance(qubit, MeasureQubit)
+                        if qubit.basis == 'X':
+                            qubit_colors[qubit.idx] = mpl_setup.hex_to_rgb(mpl_setup.colors[0], True)
+                        else:
+                            qubit_colors[qubit.idx] = mpl_setup.hex_to_rgb(mpl_setup.colors[1], True)
+                assert None not in qubit_colors
+            else:
+                cmap = mpl.colormaps[cmap_name]
+                qubit_colors = []
+                for i,val in enumerate(qubit_vals):
+                    qubit_colors.append(cmap((val-min_val)/(max_val-min_val)))
+
+        for i,color in enumerate(qubit_colors):
+            q = self.qubit_name_dict[i]
+            coords = q.coords
+            xvals = [coords[1], coords[1]+1, coords[1], coords[1]-1]
+            yvals = [coords[0]+1, coords[0], coords[0]-1, coords[0]]
+
+            ax.fill(xvals, yvals, color=color, edgecolor='k', linewidth=font_size/12)
+
+            if (color[0]*0.299*256 + color[1]*0.587*256 + color[2]*0.114*256) > 186:
+                text_color = 'k'
+            else:
+                text_color = 'w'
+
+            if plot_text == 'basis':
+                if isinstance(q, MeasureQubit):
+                    ax.text(coords[1], coords[0], f'{q.basis}', ha='center', va='center', color=text_color, fontsize=font_size)
+            elif plot_text == 'idx':
+                ax.text(coords[1], coords[0], f'{i}', ha='center', va='center', color=text_color, fontsize=font_size)
+            elif plot_text == 'val' and qubit_vals is not None and np.isfinite(val):
+                exponent, rem = np.divmod(np.log10(qubit_vals[i]), 1)
+                if np.isfinite(exponent) and np.isfinite(rem):
+                    ax.text(coords[1], coords[0], f'{10**rem:0.1f}e{int(exponent)}', ha='center', va='center', color=text_color, fontsize=font_size)
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        return ax
+
+    def plot_connection_vals(
+            self,
+            connection_vals: dict[tuple[int, int], float],
+            ax: plt.Axes | None = None,
+        ):
+        """Plot qubit connection values as a heatmap.
+        
+        Args:
+            connection_vals: Array of connection values to plot.
+            ax: Axes to plot on. If None, create new figure.
+        """
+        pass
 
 class color:
     PURPLE = '\033[1;35;48m'

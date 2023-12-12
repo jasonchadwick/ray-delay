@@ -70,23 +70,26 @@ class MemoryPatch(SurfaceCodePatch):
         )
         circ.append(stim.CircuitRepeatBlock(self.dm - 1, self.syndrome_round(stim.Circuit())))
 
+        # measurement
         if ideal_init_and_meas:
-            self.measure_ideal(circ, observable_basis, add_observable=True)
+            # self.measure_logical_operator_ideal(circ, observable_basis, True)
+            self.meas_ideal(circ, 'M' if observable_basis == 'Z' else 'MX', [data.idx for data in self.data])
         else:
             # Measure in observable basis
             self.reset_meas_qubits(circ, 'M' if observable_basis == 'Z' else 'MX', [data.idx for data in self.data])
-            # Check consistency of data qubit measurements with last stabilizer measurement
-            for measure in observable_ancilla:
-                data_rec = [self.get_meas_rec(-1, data.idx) for data in measure.data_qubits if data is not None]
-                circ.append('DETECTOR', data_rec + [self.get_meas_rec(-2, measure.idx)], measure.coords + (1,))
+            
+        # Check consistency of data qubit measurements with last stabilizer measurement
+        for measure in observable_ancilla:
+            data_rec = [self.get_meas_rec(-1, data.idx) for data in measure.data_qubits if data is not None]
+            circ.append('DETECTOR', data_rec + [self.get_meas_rec(-2, measure.idx)], measure.coords + (0,))
 
-            # Logical observable
-            circ.append(
-                'OBSERVABLE_INCLUDE', 
-                [self.get_meas_rec(-1, data.idx) 
-                 for data in (
-                     self.logical_z_qubits if observable_basis == 'Z' 
-                     else self.logical_x_qubits)], 
-                0)
+        # Logical observable
+        circ.append(
+            'OBSERVABLE_INCLUDE', 
+            [self.get_meas_rec(-1, data.idx) 
+                for data in (
+                    self.logical_z_qubits if observable_basis == 'Z' 
+                    else self.logical_x_qubits)], 
+            0)
 
         return circ

@@ -12,6 +12,7 @@ pymatching = "*"
 matplotlib = "*"
 qutip = "*"
 ipykernel = "*"
+qiskit = "*"
 
 [dev-packages]
 

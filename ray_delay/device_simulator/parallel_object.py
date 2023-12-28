@@ -1,6 +1,8 @@
+"""TODO
+"""
+import time
 import multiprocessing as mp
 from typing import Any
-import time
 
 class ParallelObject(mp.Process):
     """Class to wrap around an object and speed up repeated simulations

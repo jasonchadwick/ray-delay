@@ -8,7 +8,7 @@ Features:
     Correlation rates between qubits can be specified to model some effects of crosstalk.
 
 """
-
+from itertools import product, chain, combinations
 import numpy as np
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
@@ -16,7 +16,6 @@ import matplotlib as mpl
 import stim
 import sinter
 import pymatching
-from itertools import product, chain, combinations
 import qc_utils.matplotlib_setup as mpl_setup
 
 class Qubit():
@@ -70,9 +69,10 @@ class SurfaceCodePatch():
             dx: int,
             dz: int,
             dm: int,
-            gate1_time: float = 25e-9, 
+            gate1_time: float = 25e-9, # params from Google scaling logical qubit paper
             gate2_time: float = 34e-9, 
-            mr_time: float = 500e-9, 
+            meas_time: float = 500e-9, 
+            reset_time: float = 250e-9, # Multi-level reset from McEwen et al. (2021)
             apply_idle_during_gates: bool = True,
             save_stim_circuit: bool = False
         ) -> None:
@@ -84,9 +84,12 @@ class SurfaceCodePatch():
             dm: Temporal distance of code (= number of rounds of measurement). 
             gate1_time: duration of single-qubit gates.
             gate2_time: duration of two-qubit gates.
-            mr_time: duration of readout and reset.
+            meas_time: duration of readout.
+            reset_time: duration of reset operation.
             apply_idle_during_gates: If True, apply idle errors to qubits while
-                performing gate operations
+                performing gate operations and measurement (gate error rates
+                should be adjusted accordingly - total gate error will be idle
+                error plus gate error rates).
             save_stim_circuit: If True, save each Stim circuit for quick
                 querying (if noise models have not changed since last time).
         """
@@ -124,7 +127,8 @@ class SurfaceCodePatch():
 
         self.gate1_time = gate1_time
         self.gate2_time = gate2_time
-        self.mr_time = mr_time
+        self.meas_time = meas_time
+        self.reset_time = reset_time
 
         # Keeps track of Stim measurement results for each qubit measured in
         # each round. Each list entry is a round, and each key to the inner
@@ -188,7 +192,7 @@ class SurfaceCodePatch():
         
         Returns:
             Time for one stabilizer cycle."""
-        return self.gate1_time * 2 + self.gate2_time * 4 + self.mr_time
+        return self.gate1_time * 2 + self.gate2_time * 4 + self.meas_time + self.reset_time
 
     def place_data(
             self,
@@ -642,7 +646,7 @@ class SurfaceCodePatch():
             circ: Stim circuit to append to.
             t: Amount of time to idle.
             non_idle_qubits: List of qubit indices which do NOT experience the
-                idle errors.
+                idle errors. Only used if idle_qubits = [].
             idle_qubits: List of qubit indices which DO experience the idle
                 errors. If empty, set to list of ALL qubits (except those in
                 non_idle_qubits). 
@@ -664,6 +668,7 @@ class SurfaceCodePatch():
             circ: stim.Circuit, 
             gate: str, 
             qubits: list[int],
+            unused_qubits_idle: bool = True,
         ) -> None:
         """Applies a single-qubit gate to qubits. Applies idle errors to unused
         qubits. Adds a TICK instruction after.
@@ -672,6 +677,8 @@ class SurfaceCodePatch():
             circ: Stim circuit to append to.
             gate: Single-qubit gate to perform on each qubit, e.g. 'X' or 'H'.
             qubits: List of qubits to apply the gate to.
+            unused_qubits_idle: If True, apply idle errors to unused qubits.
+                Appends a TICK instruction after.
         """
         qubits = [q for q in qubits if self.qubits_active[q]]
         qubit_repeat_nums = dict()
@@ -690,15 +697,20 @@ class SurfaceCodePatch():
                     self.apply_exclusive_errors_with_correlations(circ, [qubit], ['X','Y','Z'], [p/3, p/3, p/3], cutoff=self.probability_cutoff)
                 else:
                     circ.append('DEPOLARIZE1', [qubit], p)
-            self.apply_idle(
-                circ, 
-                self.gate1_time, 
-                non_idle_qubits=(
-                    [] if self.apply_idle_during_gates
-                    else qubits_to_use
+
+            if self.apply_idle_during_gates:
+                self.apply_idle(
+                    circ, 
+                    self.gate1_time, 
+                    non_idle_qubits=qubits_to_use,
                 )
-            )
-            circ.append('TICK')
+            if unused_qubits_idle:
+                self.apply_idle(
+                    circ, 
+                    self.gate1_time, 
+                    non_idle_qubits=qubits_to_use,
+                )
+                circ.append('TICK')
 
             # subtract 1 from all repeat nums and remove elems with 0 more repeats
             qubit_repeat_nums = {q:r-1 for q,r in qubit_repeat_nums.items() if r > 1}
@@ -708,6 +720,7 @@ class SurfaceCodePatch():
             circ: stim.Circuit, 
             gate: str, 
             qubit_pairs: list[tuple[int, int]],
+            unused_qubits_idle: bool = True,
         ) -> None:
         """Applies a two-qubit gate to qubit_pairs. Applies idle errors to
         unused qubits. Adds a TICK instruction after.
@@ -738,64 +751,91 @@ class SurfaceCodePatch():
                     self.apply_exclusive_errors_with_correlations(circ, [q1,q2], pauli_strings, [p/15]*15, cutoff=self.probability_cutoff)
                 else:
                     circ.append('DEPOLARIZE2', [q1,q2], p)
-            self.apply_idle(
-                circ, 
-                self.gate2_time, 
-                non_idle_qubits=(
-                    [] if self.apply_idle_during_gates
-                    else qubits
+            
+            if self.apply_idle_during_gates:
+                self.apply_idle(
+                    circ, 
+                    self.gate2_time, 
+                    non_idle_qubits=qubits,
                 )
-            )
-            circ.append('TICK')
+            if unused_qubits_idle:
+                self.apply_idle(
+                    circ, 
+                    self.gate2_time, 
+                    non_idle_qubits=qubits,
+                )
+                circ.append('TICK')
 
             # subtract 1 from all repeat nums and remove elems with 0 more repeats
             pair_repeat_nums = {p:r-1 for p,r in pair_repeat_nums.items() if r > 1}
 
-    def reset_meas_qubits(
-            self, 
-            circ: stim.Circuit, 
-            op: str, 
-            qubits: list[int], 
-            apply_idle: bool = True,
-        ) -> None:
-        """Applies a M, MX, MR, or R operation to qubits. Applies idle errors
-        to unused qubits. Adds a TICK instruction after.
-
+    def apply_reset(
+            self,
+            circ: stim.Circuit,
+            qubits: list[int],
+            unused_qubits_idle: bool = True,
+        ):
+        """Applies a Z reset operator to specified qubits.
+        
         Args:
             circ: Stim circuit to append to.
-            op: Measure/reset op to apply, such as 'M', 'MZ', 'MR', 'RZ'.
             qubits: List of qubits to apply the operation to.
-            apply_idle: If True, apply idle errors to all qubits that are not in
-                `qubits`. 
+            unused_qubits_idle: If True, apply idle errors to unused qubits.
+                Appends a TICK instruction after. 
         """
-        qubits = [q for q in qubits if self.qubits_active[q]]
-        time = 0
-        if op == 'R':
-            circ.append(op, qubits)
-            time = self.mr_time
-        elif op == 'M' or op == 'MR' or op == 'MX':
-            for qubit in qubits:
-                circ.append(op, qubit, self.error_vals['readout_err'][qubit])
 
-            # Update measurement record indices
-            meas_round = {}
-            for i in range(len(qubits)):
-                q = qubits[-(i + 1)]
-                meas_round[q] = -(i + 1)
-            for round in self.meas_record:
-                for q, idx in round.items():
-                    round[q] = idx - len(qubits)
-            self.meas_record.append(meas_round)
-            time = self.mr_time
-        elif op == 'RX':
-            circ.append(op, qubits)
-            time = self.mr_time + self.gate1_time
-        else:
-            raise Exception('Unknown measure/reset operation')
-        
-        if apply_idle:
-            self.apply_idle(circ, time, non_idle_qubits=qubits)
+        circ.append('R', qubits)
+
+        if unused_qubits_idle:
+            self.apply_idle(
+                circ, 
+                self.reset_time, 
+                non_idle_qubits=qubits
+            )
             circ.append('TICK')
+
+    def apply_meas(
+            self,
+            circ: stim.Circuit,
+            qubits: list[int],
+            unused_qubits_idle: bool = True,
+        ):
+        """Applies a Z measurement operator to specified qubits. Updates
+        self.meas_record.
+        
+        Args:
+            circ: Stim circuit to append to.
+            qubits: List of qubits to apply the operation to.
+            unused_qubits_idle: If True, apply idle errors to unused qubits.
+                Appends a TICK instruction after. 
+        """
+
+        if self.apply_idle_during_gates:
+            self.apply_idle(
+                circ, 
+                self.meas_time, 
+                non_idle_qubits=qubits
+            )
+        if unused_qubits_idle:
+            self.apply_idle(
+                circ, 
+                self.meas_time, 
+                non_idle_qubits=qubits
+            )
+            circ.append('TICK')
+        
+        for qubit in qubits:
+            circ.append('M', qubit, self.error_vals['readout_err'][qubit])
+
+        # Update measurement record indices
+        meas_round = {}
+        for i in range(len(qubits)):
+            q = qubits[-(i + 1)]
+            meas_round[q] = -(i + 1)
+        for round in self.meas_record:
+            for q, idx in round.items():
+                round[q] = idx - len(qubits)
+        self.meas_record.append(meas_round)
 
     def meas_ideal(
             self,
@@ -955,9 +995,8 @@ class SurfaceCodePatch():
         Returns:
             Modified Stim circuit with a syndrome round appended.
         """
-        self.reset_meas_qubits(circ,'R', [measure.idx 
-                                          for measure in self.ancilla
-                                          if self.qubits_active[measure.idx]])
+        self.apply_reset(circ, [measure.idx for measure in self.ancilla
+                                if self.qubits_active[measure.idx]])
 
         # CNOTs
         self.apply_1gate(circ, 'H', [measure.idx 
@@ -981,9 +1020,8 @@ class SurfaceCodePatch():
                                      if self.qubits_active[measure.idx]])
 
         # Measure
-        self.reset_meas_qubits(circ, 'M', [measure.idx 
-                                           for measure in self.ancilla
-                                           if self.qubits_active[measure.idx]])
+        self.apply_meas(circ, [measure.idx for measure in self.ancilla
+                               if self.qubits_active[measure.idx]])
 
         for ancilla in self.ancilla:
             if (self.qubits_active[ancilla.idx] 
@@ -1172,7 +1210,7 @@ class SurfaceCodePatch():
             self, 
             only_intermediate_detectors: bool = True, 
             **stim_kwargs,
-        ):
+        ) -> list[Qubit]:
         """Get qubits corresponding to detectors in each syndrome round.
         
         Args:
@@ -1184,11 +1222,12 @@ class SurfaceCodePatch():
         """
         detector_coords = self.get_stim(**stim_kwargs).get_detector_coordinates()
         round_1_coords = {det: coords[:2] for det, coords in detector_coords.items() if coords[2] == 1}
-        syndrome_qubits = [None] * len(round_1_coords)
+        syndrome_qubits: list[Qubit | None] = [None] * len(round_1_coords)
         min_idx = min(round_1_coords.keys())
         for det, det_coords in round_1_coords.items():
             qubit = self.device[int(det_coords[0])][int(det_coords[1])]
             syndrome_qubits[det - min_idx] = qubit
+        assert None not in syndrome_qubits
         return syndrome_qubits
 
     def plot_qubit_vals(

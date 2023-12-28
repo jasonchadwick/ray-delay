@@ -1,3 +1,5 @@
+"""TODO
+"""
 import stim
 from ray_delay.device_simulator.stim_simulator.patch import SurfaceCodePatch, DataQubit, MeasureQubit
 
@@ -57,7 +59,7 @@ class MemoryPatch(SurfaceCodePatch):
         if ideal_init_and_meas:
             self.initialize_ideal(circ, {'X':'+', 'Y':'i', 'Z':'0'}[observable_basis])
         else:
-            self.reset_meas_qubits(circ, 'R', [q.idx for q in self.all_qubits])
+            self.apply_reset(circ, [q.idx for q in self.all_qubits])
             if observable_basis == 'X':
                 self.apply_1gate(circ, 'H', [q.idx for q in self.data])
 
@@ -76,7 +78,9 @@ class MemoryPatch(SurfaceCodePatch):
             self.meas_ideal(circ, 'M' if observable_basis == 'Z' else 'MX', [data.idx for data in self.data])
         else:
             # Measure in observable basis
-            self.reset_meas_qubits(circ, 'M' if observable_basis == 'Z' else 'MX', [data.idx for data in self.data])
+            if observable_basis == 'X':
+                self.apply_1gate(circ, 'H', [q.idx for q in self.data])
+            self.apply_meas(circ, [q.idx for q in self.data])
             
         # Check consistency of data qubit measurements with last stabilizer measurement
         for measure in observable_ancilla:

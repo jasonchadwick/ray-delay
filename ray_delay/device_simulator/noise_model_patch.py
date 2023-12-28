@@ -1,17 +1,7 @@
-import os
-import sys
-module_path = os.path.abspath(os.path.join('..'))
-if module_path not in sys.path:
-    sys.path.append(module_path)
-
-from numpy.typing import NDArray
-import numpy as np
-import math
+"""TODO
+"""
 from ray_delay.device_simulator.stim_simulator.patch import SurfaceCodePatch
 from ray_delay.device_simulator.noise_model import NoiseModel, NoiseParams, StandardIdenticalNoiseParams
-
-import time
-import os
 
 class NoiseModelPatch:
     """TODO

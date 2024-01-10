@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "ray-delay"
+version = "0.1.0"
+description = ""
+authors = ["Jason Chadwick <jchadwick100@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "~3.11"
+numpy = "^1.26.3"
+scipy = "^1.11.4"
+matplotlib = "^3.8.2"
+stim = "^1.12.1"
+sinter = "^1.12.1"
+pymatching = "^2.1.0"
+ipykernel = "^6.28.0"
+qiskit = "^0.45.1"
+qutip = "^4.7.3"
+qc-utils = {git = "https://github.com/jasonchadwick/qc_utils.git"}
+stim-surface-code = {git = "https://github.com/jasonchadwick/stim_surface_code.git"}
+mpmath = "^1.3.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

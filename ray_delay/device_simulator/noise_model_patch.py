@@ -1,7 +1,7 @@
 """TODO
 """
-from ray_delay.device_simulator.stim_simulator.patch import SurfaceCodePatch
-from ray_delay.device_simulator.noise_model import NoiseModel, NoiseParams, StandardIdenticalNoiseParams
+from stim_surface_code.patch import SurfaceCodePatch
+from ray_delay.device_simulator.noise_model import NoiseModel, CosmicRayNoiseParams, GoogleNoiseParams
 
 class NoiseModelPatch:
     """TODO
@@ -11,7 +11,7 @@ class NoiseModelPatch:
     def __init__(
             self, 
             patch: SurfaceCodePatch, 
-            noise_params: NoiseParams | None = StandardIdenticalNoiseParams, 
+            noise_params: CosmicRayNoiseParams | None = GoogleNoiseParams.improve_noise_params(10),
             noise_model: NoiseModel | None = None,
             seed: int | None = None,
         ):

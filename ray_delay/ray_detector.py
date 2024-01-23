@@ -2,6 +2,41 @@
 """
 import numpy as np
 from stim_surface_code.patch import Qubit, MeasureQubit
+from dataclasses import dataclass
+from enum import Enum
+from typing import Callable
+from numpy.typing import NDArray
+
+class RayModelType(Enum):
+    """TODO"""
+    CONSTANT = 0
+    LINEAR_ERR = 1
+    LINEAR_T1 = 2
+
+@dataclass
+class RayDetectorSpec:
+    """Encodes information about ray model and detector.
+    
+    Attributes:
+        detector_spatial_window_size: Edge length of the square region to
+            consider when detecting cosmic rays, in units of device indices.
+            Must be smaller than width and height of device.
+        detector_temporal_window_size: The number of syndrome measurement
+            rounds to consider when detecting cosmic rays.
+        ray_model_type: The type of ray model to use.
+        ray_radius: The radius of the ray model, in units of device indices.
+        ray_max_strength: The strength at the center of the ray.
+        detection_chance_function: A function that takes in distance(s) from
+            center of ray amd number of rounds since ray impact, and returns the
+            chance of the ray being detected by a stabilizer(s) at the given
+            distance(s).
+    """
+    detector_spatial_window_size: int
+    detector_temporal_window_size: int
+    ray_model_type: RayModelType
+    ray_radius: float
+    ray_max_strength: float
+    detection_chance_function: Callable[[NDArray[np.float_] | float, int], NDArray[np.float_] | float]
 
 class RayDetector:
     """Detects cosmic ray impacts on a surface code patch using syndrome

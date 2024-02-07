@@ -121,21 +121,23 @@ class CosmicRay:
     """
     def __init__(
             self,
-            center_qubit: int,
+            center_coords: tuple[int, int],
             affected_qubits: list[int],
             radius: float,
         ) -> None:
         """Create a cosmic ray.
         
         Args:
+            center_qubit: Qubit at the center of the cosmic ray (or None if
+                outside the patch).
             affected_qubits: List of qubits that are affected (this is not used
                 internally, but saved for convenience).
         """
         self.init_strength = 0.99 # from https://www.nature.com/articles/s41567-021-01432-8
         self.current_strength = self.init_strength
-        self.time_alive = 0
+        self.time_alive = 0.0
         self.halflife = 30e-3 # from https://www.nature.com/articles/s41567-021-01432-8
-        self.center_qubit = center_qubit
+        self.center_coords = center_coords
         self.affected_qubits = affected_qubits
         self.radius = radius
 
@@ -291,38 +293,62 @@ class NoiseModel:
             center_qubit: Center qubit of cosmic ray impact.
             radius: Radius of cosmic ray (in terms of qubit spacing).
         """
-        affected_qubits = self.get_qubits_in_radius(center_qubit, radius)
-        ray = CosmicRay(center_qubit, affected_qubits, radius)
+        affected_qubits = self.get_qubits_in_radius(radius, center_qubit=center_qubit)
+        ray = CosmicRay(np.argwhere(self.qubit_layout == center_qubit)[0], affected_qubits, radius)
         self.active_cosmic_rays.append(ray)
         self.event_history.append(('COSMIC_RAY', (center_qubit, affected_qubits)))
         return ray
 
+    def add_cosmic_ray_by_coords(
+            self,
+            coords: tuple[int, int],
+            radius: float,
+        ) -> CosmicRay:
+        """Create a new cosmic ray and add it to the noise model.
+
+        Args:
+            coords: Coordinates of the center of the cosmic ray.
+            radius: Radius of cosmic ray (in terms of qubit spacing).
+        """
+        affected_qubits = self.get_qubits_in_radius(radius, center_coords=coords)
+        ray = CosmicRay(coords, affected_qubits, radius)
+        self.active_cosmic_rays.append(ray)
+        self.event_history.append(('COSMIC_RAY', (None, affected_qubits)))
+        return ray
+
     def get_qubits_in_radius(
             self,
-            center_qubit: int,
             radius: float,
+            center_qubit: int | None = None,
+            center_coords: tuple[int, int] | None = None,
         ) -> list[int]:
         """Return a list of all qubits within a certain radius of a qubit. List
         always contains center qubit, even for radius = 0. Searches
         self.qubit_layout. 
         
         Args:
-            center_qubit: Center qubit index.
             radius: Radius to search within.
+            center_qubit: Center qubit index, or None if using center_coords.
+            center_coords: Coordinates of the center qubit, or None if using
+                center_qubit. Works even if coords do not correspond to a
+                particular qubit, or if coords are beyond device edge
+                boundaries.
         
         Returns:
             List of qubit indices of qubits within radius.
         """
-        qubits = [center_qubit]
-        coords = np.argwhere(self.qubit_layout == center_qubit)[0]
+        qubits = []
+        if center_coords is None:
+            qubits.append(center_qubit)
+            center_coords = np.argwhere(self.qubit_layout == center_qubit)[0]
         for r_offset in range(-int(np.floor(radius)), int(np.ceil(radius))+1):
             for c_offset in range(-int(np.floor(radius)), int(np.ceil(radius))+1):
                 if (np.sqrt(r_offset**2 + c_offset**2) < radius
-                    and coords[0]+r_offset >= 0
-                    and coords[0]+r_offset < self.qubit_layout.shape[0]
-                    and coords[1]+c_offset >= 0
-                    and coords[1]+c_offset < self.qubit_layout.shape[1]):
-                    qubit = int(self.qubit_layout[coords[0]+r_offset, coords[1]+c_offset])
+                    and center_coords[0]+r_offset >= 0
+                    and center_coords[0]+r_offset < self.qubit_layout.shape[0]
+                    and center_coords[1]+c_offset >= 0
+                    and center_coords[1]+c_offset < self.qubit_layout.shape[1]):
+                    qubit = int(self.qubit_layout[center_coords[0]+r_offset, center_coords[1]+c_offset])
                     if qubit >= 0 and qubit != center_qubit:
                         qubits.append(qubit)
         return qubits

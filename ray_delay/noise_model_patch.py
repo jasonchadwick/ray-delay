@@ -1,7 +1,7 @@
 """TODO
 """
 from stim_surface_code.patch import SurfaceCodePatch
-from ray_delay.device_simulator.noise_model import NoiseModel, CosmicRayNoiseParams, GoogleNoiseParams
+from ray_delay.noise_model import NoiseModel, CosmicRayNoiseParams, GoogleNoiseParams
 
 class NoiseModelPatch:
     """TODO
@@ -49,6 +49,16 @@ class NoiseModelPatch:
             radius: The radius of the cosmic ray.
         """
         self.noise_model.add_cosmic_ray(center_qubit, radius)
+        self.step(0)
+
+    def force_cosmic_ray_by_coords(self, coords: tuple[int, int], radius: float):
+        """Create a cosmic ray outside the patch in the device noise model.
+
+        Args:
+            coords: The device coordinates of center of the cosmic ray.
+            radius: The radius of the cosmic ray.
+        """
+        self.noise_model.add_cosmic_ray_by_coords(coords, radius)
         self.step(0)
 
     def reset(self):

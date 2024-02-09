@@ -3,16 +3,12 @@
 import numpy as np
 from stim_surface_code.patch import Qubit, MeasureQubit
 from dataclasses import dataclass
-from enum import Enum
 from typing import Callable
 from numpy.typing import NDArray
 import scipy
-
-class RayModelType(Enum):
-    """TODO"""
-    CONSTANT = 0
-    LINEAR_ERR = 1
-    LINEAR_T1 = 2
+import mpmath
+from ray_delay.noise_model import CosmicRayParams
+from ray_delay.noise_model_patch import NoiseModelPatch
 
 class RayDetectorSpec:
     """Encodes information about ray model and detector.
@@ -36,9 +32,7 @@ class RayDetectorSpec:
     """
     detector_spatial_window_size: int
     detector_temporal_window_size: int
-    ray_model_type: RayModelType
-    ray_radius: float
-    ray_max_strength: float
+    ray_params: CosmicRayParams
     detection_distances: NDArray[np.float_]
     signal_rates: NDArray[np.float_]
     ray_halflife: float
@@ -47,9 +41,7 @@ class RayDetectorSpec:
             self,
             detector_spatial_window_size: int,
             detector_temporal_window_size: int,
-            ray_model_type: RayModelType,
-            ray_radius: float,
-            ray_max_strength: float,
+            ray_params: CosmicRayParams,
             detection_distances: NDArray[np.float_],
             times_after_ray_impact: NDArray[np.float_],
             first_distillation_signal_rates: NDArray[np.float_],
@@ -65,28 +57,34 @@ class RayDetectorSpec:
                 Must be smaller than width and height of device.
             detector_temporal_window_size: The number of syndrome measurement
                 rounds to consider when detecting cosmic rays.
-            ray_model_type: The type of ray model to use.
-            ray_radius: The radius of the ray model, in units of device indices.
-            ray_max_strength: The strength at the center of the ray.
+            ray_params: CosmicRayParams object describing the ray model.
             detection_distances: The distances from the center of the ray at
                 which we have computed the detection chance.
             times_after_ray_impact: The times after ray impact at which we have
                 computed the detection chance.
-            
+            first_distillation_signal_rates: For each cycle in the first
+                distillation after the ray impact, the chance that a qubit at
+                distance d is in a window that signals a ray. Must be of shape
+                (detector_temporal_window_size, len(detection_distances)).
+            decaying_signal_rates: For each time in times_after_ray_impact, the
+                chance that a qubit at distance d is in a window that signals a
+                ray. Must be of shape (len(times_after_ray_impact),
+                len(detection_distances)).
+            baseline_signal_rate: The average chance of detection for a qubit
+                when no ray is present (i.e. the false positive rate).
             ray_halflife: The time it takes for the ray to decay to half of its
                 original strength, in seconds.
         """
         self.detector_spatial_window_size = detector_spatial_window_size
         self.detector_temporal_window_size = detector_temporal_window_size
-        self.ray_model_type = ray_model_type
-        self.ray_radius = ray_radius
-        self.ray_max_strength = ray_max_strength
+        self.ray_params = ray_params
         self.detection_distances = detection_distances
         self.times_after_ray_impact = times_after_ray_impact
         assert first_distillation_signal_rates.shape == (detector_temporal_window_size, len(detection_distances))
         assert decaying_signal_rates.shape == (len(times_after_ray_impact), len(detection_distances))
         self.first_distillation_signal_rates = first_distillation_signal_rates
         self.decaying_signal_rates = decaying_signal_rates
+        self.baseline_signal_rate = baseline_signal_rate
         self.ray_halflife = ray_halflife
 
         first_distillation_signal_rates_float = first_distillation_signal_rates.astype(float)
@@ -145,8 +143,7 @@ class RayImpactSimulator:
     """
     def __init__(
             self, 
-            ray_detector_spec: RayDetectorSpec,
-            device: list[list[Qubit | None]],
+            patch: NoiseModelPatch,
             spatial_window_size: int,
             only_full_windows: bool = False,
         ):
@@ -163,18 +160,188 @@ class RayImpactSimulator:
                 least partially filled with qubits (such as windows on the edges
                 of a device patch).
         """
-        self.ray_detector_spec = ray_detector_spec
-        self._device = device
+        self._patch = patch
+        self._spatial_window_size = spatial_window_size
         self._windows = self._initialize_windows(
             spatial_window_size, 
             only_full_windows
         )
         
-    def generate_detector_model(
+    def generate_detector_spec(
             self,
-
+            window_fpr: float | mpmath.mpf,
+            cycles_per_distillation: int,
+            temporal_window_size: int | None = None,
+            max_simulate_time: float = 30e-3,
+            decay_nsteps: int = 10,
+            save_detector_spec: bool = False,
         ):
-        raise NotImplementedError
+        """Generate a RayDetectorSpec object for the given patch by simulating a
+        cosmic ray impact at the center of the patch and calculating the chances
+        that each qubit lies within a triggering detection window.
+
+        Args:
+            window_fpr: The desired false positive rate for every
+                window. If type is mpmath.mpf, this type will be used throughout
+                the computation. This will be more accurate for very low
+                probabilities, but will be slower to calculate.
+            cycles_per_distillation: The number of syndrome measurement rounds
+                per distillation cycle.
+            temporal_window_size: The number of syndrome measurement rounds to
+                consider when detecting cosmic rays. If None, use
+                cycles_per_distillation.
+            max_simulate_time: The maximum time to simulate the tail decay of
+                the ray.
+            decay_nsteps: The number of evenly-spaced steps to use when
+                simulating the decay of the ray.
+            save_detector_spec: If True, save RayDetectorSpec object to a file
+                via pickle.
+        """
+        # patch should be sufficiently large so that ray does not reach boundaries
+        assert len(self._patch.patch.device) > 2*self._patch.noise_params.cosmic_ray_params.max_radius + 2*self._spatial_window_size
+        assert len(self._patch.patch.device[0]) > 2*self._patch.noise_params.cosmic_ray_params.max_radius + 2*self._spatial_window_size
+
+        # simulate ray impact and decay
+        self._patch.reset()
+        baseline_fractions = np.mean(self._patch.patch.count_detection_events(1e6, return_full_data=True)[0], axis=0)
+
+        center_coords = (len(self._patch.patch.device) // 2, 
+                         len(self._patch.patch.device[0]) // 2)
+
+        # self._patch.force_cosmic_ray_by_coords(center_coords)
+        # ray_fractions = []
+        # timestep = max_simulate_time / (decay_nsteps-1)
+        # for i in range(decay_nsteps):
+        #     ray_fractions.append(np.mean(self._patch.patch.count_detection_events(1e6, return_full_data=True)[0], axis=0))
+        #     self._patch.step(timestep)
+        # self._patch.reset()
+        ray_fractions = []
+        for time in np.linspace(0, max_simulate_time, decay_nsteps):
+            self._patch.reset()
+            self._patch.force_cosmic_ray_by_coords(center_coords)
+            self._patch.step(time)
+            ray_fractions.append(np.mean(self._patch.patch.count_detection_events(1e6, return_full_data=True)[0], axis=0))
+
+        syndrome_qubits = self._patch.patch.get_syndrome_qubits()
+        baseline_fractions_labeled = {q.idx: baseline_fractions[i] for i,q in enumerate(syndrome_qubits)}
+        ray_fractions_labeled = [{q.idx:r[i] for i,q in enumerate(syndrome_qubits)} for r in ray_fractions]
+        
+        # calculate distance from center for each qubit
+        ancilla_distances = np.zeros(len(self._patch.patch.ancilla), dtype=float)
+        for i,qubit in enumerate(self._patch.patch.ancilla):
+            coords = qubit.coords
+            ancilla_distances[i] = np.sqrt((coords[0]-center_coords[0])**2 + (coords[1]-center_coords[1])**2)
+
+        unique_distances = []
+        qubits_per_distance = []
+        for i,dst in enumerate(ancilla_distances):
+            qubit = self._patch.patch.ancilla[i].idx
+            dst_rounded = np.round(dst, 2)
+            if dst_rounded not in unique_distances:
+                unique_distances.append(dst_rounded)
+                qubits_per_distance.append([qubit])
+            else:
+                qubits_per_distance[unique_distances.index(dst_rounded)].append(qubit)
+        qubits_per_distance = np.array(qubits_per_distance, dtype=object)[np.argsort(unique_distances)]
+        unique_distances = np.sort(unique_distances)
+
+        # calculate detection chances within first distillation, for each cycle.
+        # Within this time frame, the temporal detection windows will not fully
+        # contain the ray.
+        # TODO: lots of code re-use between this section and the next section;
+        # could probably be refactored into one function that takes different
+        # sets of detector means.
+        # TODO: would it be better to work in log space for floating point
+        # accuracy? 
+        if temporal_window_size is None:
+            temporal_window_size = cycles_per_distillation
+        dtype = type(window_fpr)
+        window_signal_rates = np.zeros((cycles_per_distillation, len(self._windows)), dtype=dtype)
+        for cycle in range(cycles_per_distillation):
+            for k,window in enumerate(self._windows):
+                baseline_mean = np.mean([baseline_fractions_labeled[q] for q in window]) # mean per qubit per round
+                
+                # take first ray data point (error values at moment of ray impact)
+                ray_mean = np.mean([ray_fractions_labeled[0][q] for q in window])
+
+                # threshold of detections where we say it is outside of the baseline regime
+                detection_threshold = scipy.stats.binom.ppf(float(1-window_fpr), len(window)*temporal_window_size, baseline_mean)
+            
+                if cycle <= temporal_window_size:
+                    # some part of window is at baseline rate (before ray has hit)
+                    windowed_syndrome_rate = baseline_mean*(1-cycle/temporal_window_size) + ray_mean*(cycle/temporal_window_size)
+                else:
+                    windowed_syndrome_rate = ray_mean
+
+                detection_prob = 1-scipy.stats.binom.cdf(detection_threshold, len(window)*temporal_window_size, windowed_syndrome_rate)
+                window_signal_rates[cycle,k] = dtype(detection_prob)
+
+        qubit_no_signal_rates = np.ones((cycles_per_distillation, len(self._patch.patch.all_qubits)), dtype=dtype)
+        for cycle in range(cycles_per_distillation):
+            for k,window in enumerate(self._windows):
+                signal_rate = window_signal_rates[cycle,k]
+                for q in window:
+                    qubit_no_signal_rates[cycle,q] *= (1-signal_rate)
+
+        # FPR of a non-ray qubit = average signal rate of all qubits before ray
+        # has entered temporal detection windows.
+        false_positive_rate = np.mean(1-qubit_no_signal_rates[0])
+
+        first_distillation_signal_rate_by_distance = np.zeros((cycles_per_distillation, len(unique_distances)), dtype=dtype)
+        for k,dst in enumerate(unique_distances):
+            for q in qubits_per_distance[k]:
+                first_distillation_signal_rate_by_distance[:,k] += (1-qubit_no_signal_rates[:,q])
+            first_distillation_signal_rate_by_distance[:,k] /= len(qubits_per_distance[k])
+
+            # lower bound by average false positive rate
+            for cycle in range(cycles_per_distillation):
+                first_distillation_signal_rate_by_distance[cycle,k] = np.maximum(first_distillation_signal_rate_by_distance[cycle,k], false_positive_rate)
+        
+        # calculate detection chances within the tail decay of the ray.
+        decay_signal_rates = np.zeros((decay_nsteps, len(self._windows)), dtype=dtype)
+        for j in range(decay_nsteps):
+            for k,window in enumerate(self._windows):
+                windowed_syndrome_rate = np.mean([ray_fractions_labeled[j][q] for q in window])
+
+                # threshold of detections where we say it is outside of the baseline regime
+                detection_threshold = scipy.stats.binom.ppf(float(1-window_fpr), len(window)*temporal_window_size, baseline_mean)
+
+                detection_prob = 1-scipy.stats.binom.cdf(detection_threshold, len(window)*temporal_window_size, windowed_syndrome_rate)
+                decay_signal_rates[j,k] = dtype(detection_prob)
+
+        qubit_no_signal_rates = np.ones((decay_nsteps, len(self._patch.patch.all_qubits)), dtype=dtype)
+        for j in range(decay_nsteps):
+            for k,window in enumerate(self._windows):
+                signal_rate = decay_signal_rates[j,k]
+                for q in window:
+                    qubit_no_signal_rates[j,q] *= (1-signal_rate)
+
+        decaying_signal_rate_by_distance = np.zeros((decay_nsteps, len(unique_distances)), dtype=dtype)
+        for k,dst in enumerate(unique_distances):
+            for q in qubits_per_distance[k]:
+                decaying_signal_rate_by_distance[:,k] += (1-qubit_no_signal_rates[:,q])
+            decaying_signal_rate_by_distance[:,k] /= len(qubits_per_distance[k])
+
+            # lower bound by average false positive rate
+            for j in range(decay_nsteps):
+                decaying_signal_rate_by_distance[j,k] = np.maximum(decaying_signal_rate_by_distance[j,k], false_positive_rate)
+
+        ray_detector_spec = RayDetectorSpec(
+            detector_spatial_window_size = self._spatial_window_size,
+            detector_temporal_window_size = temporal_window_size,
+            ray_params = self._patch.noise_params.cosmic_ray_params,
+            detection_distances = unique_distances,
+            times_after_ray_impact = np.linspace(0, max_simulate_time, decay_nsteps),
+            first_distillation_signal_rates = first_distillation_signal_rate_by_distance,
+            decaying_signal_rates = decaying_signal_rate_by_distance,
+            baseline_signal_rate = float(false_positive_rate),
+        )
+
+        if save_detector_spec:
+            with open(f'ray_detector_spec_threshold_1e{int(np.round(np.log10(float(1-threshold))))}.pkl', 'wb') as f:
+                pickle.dump(ray_detector_spec, f)
+
+        return ray_detector_spec
 
     def _initialize_windows(
             self,
@@ -197,9 +364,9 @@ class RayImpactSimulator:
             A list of lists of qubit indices, where each inner list contains the
             indices of the qubits in one spatial window.
         """
-        assert spatial_window_size < len(self._device) and spatial_window_size < len(self._device[0])
-        window_rows = (len(self._device) - spatial_window_size)//2 + 1
-        window_cols = (len(self._device[0]) - spatial_window_size)//2 + 1
+        assert spatial_window_size < len(self._patch.patch.device) and spatial_window_size < len(self._patch.patch.device[0])
+        window_rows = (len(self._patch.patch.device) - spatial_window_size)//2 + 1
+        window_cols = (len(self._patch.patch.device[0]) - spatial_window_size)//2 + 1
 
         min_qubit_count = spatial_window_size**2 if only_full_windows else 1
 
@@ -209,7 +376,7 @@ class RayImpactSimulator:
                 window_qubits = []
                 for r in range(wr, wr + spatial_window_size):
                     for c in range(wc, wc + spatial_window_size):
-                        qb = self._device[2*r][2*c]
+                        qb = self._patch.patch.device[2*r][2*c]
                         if isinstance(qb, MeasureQubit):
                             window_qubits.append(qb.idx)
                 if len(window_qubits) >= min_qubit_count:
@@ -244,7 +411,7 @@ class RayDetector:
             trigger_confidence: The confidence threshold for detecting a cosmic
                 ray, based on the binomial distribution PPF. Must be between 0
                 and 1. A higher value decreases false positive chance but
-                increases detection latency.
+                increases detection cycle.
             auto_clean_data_on_detection: If True, remove last window_size
                 syndrome measurement rounds upon detection of suspected cosmic
                 rays. This is useful for preventing false positives for future

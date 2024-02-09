@@ -1,7 +1,7 @@
 """TODO
 """
 from stim_surface_code.patch import SurfaceCodePatch
-from ray_delay.noise_model import NoiseModel, CosmicRayNoiseParams, GoogleNoiseParams
+from ray_delay.noise_model import NoiseModel, CosmicRayNoiseParams, GoogleNoiseParamsNoRandomRays
 
 class NoiseModelPatch:
     """TODO
@@ -11,7 +11,7 @@ class NoiseModelPatch:
     def __init__(
             self, 
             patch: SurfaceCodePatch, 
-            noise_params: CosmicRayNoiseParams | None = GoogleNoiseParams.improve_noise_params(10),
+            noise_params: CosmicRayNoiseParams = GoogleNoiseParamsNoRandomRays.improve_noise_params(10),
             noise_model: NoiseModel | None = None,
             seed: int | None = None,
         ):
@@ -19,11 +19,14 @@ class NoiseModelPatch:
 
         Args:
             patch: The SurfaceCodePatch object to use.
-            noise_params: The noise parameters to use.
-            noise_model: The noise model to use.
-            seed: The seed to use for the noise model.
+            noise_params: The noise parameters to use to generate a NoiseModel
+                object, if none is explicitly given.
+            noise_model: The NoiseModel object to use. Overrides noise_params.
+            seed: The seed to use for NoiseModel generation if noise_model is
+                None.
         """
         self.patch = patch
+        self.noise_params = noise_params
         if noise_model is not None:
             self.noise_model = noise_model
         else:
@@ -41,22 +44,22 @@ class NoiseModelPatch:
         self.noise_model.step(elapsed_time)
         self.patch.set_error_vals(self.noise_model.get_error_val_dict())
 
-    def force_cosmic_ray(self, center_qubit: int, radius: float):
+    def force_cosmic_ray(self, center_qubit: int, radius: float | None = None):
         """Create a cosmic ray in the device noise model.
 
         Args:
             center_qubit: The qubit at the center of the cosmic ray.
-            radius: The radius of the cosmic ray.
+            radius: The radius of the cosmic ray. If not given, use default.
         """
         self.noise_model.add_cosmic_ray(center_qubit, radius)
         self.step(0)
 
-    def force_cosmic_ray_by_coords(self, coords: tuple[int, int], radius: float):
+    def force_cosmic_ray_by_coords(self, coords: tuple[int, int], radius: float | None = None):
         """Create a cosmic ray outside the patch in the device noise model.
 
         Args:
             coords: The device coordinates of center of the cosmic ray.
-            radius: The radius of the cosmic ray.
+            radius: The radius of the cosmic ray. If not given, use default.
         """
         self.noise_model.add_cosmic_ray_by_coords(coords, radius)
         self.step(0)

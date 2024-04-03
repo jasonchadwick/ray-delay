@@ -19,9 +19,8 @@ class RayModelType(Enum):
         LINEAR_T1: Cosmic rays cause linear decrease in T1 time from center to
             edge.
     """
-    CONSTANT = 0
-    LINEAR_ERR = 1
-    LINEAR_T1 = 2
+    DIRECT = 0
+    SCRAMBLING = 1
 
 @dataclass
 class CosmicRayParams:
@@ -31,16 +30,18 @@ class CosmicRayParams:
     chance_per_qubit: float = 0.1 / 27
     min_radius: float = 6.0
     max_radius: float = 6.0
-    model: RayModelType = RayModelType.LINEAR_ERR
-    init_strength: float = 0.99
+    model: RayModelType = RayModelType.DIRECT
+    max_strength: float = 0.99
+    tls_density: float = 1.0
 
 # from https://www.nature.com/articles/s41567-021-01432-8
 GoogleRayParams = CosmicRayParams(
     chance_per_qubit = 0.1 / 27, 
     min_radius = 6.0,
     max_radius = 6.0,
-    model = RayModelType.LINEAR_ERR,
-    init_strength = 0.99,
+    model = RayModelType.DIRECT,
+    max_strength = 0.99,
+    tls_density = 1.0,
 )
 
 GoogleRayParamsNoRandomRays = copy.deepcopy(GoogleRayParams)
@@ -50,53 +51,63 @@ class CosmicRayNoiseParams(NoiseParams):
     """Describes the noise affecting a system.
     
     Attributes:
-        baseline_error_means: Mean error vals (gate errors, T1/T2).
-        baseline_error_stdevs: Standard deviations of error vals.
+        error_means: Mean error vals (gate errors, T1/T2).
+        error_stdevs: Standard deviations of error vals.
         error_distributions_log: Whether each error val is distributed on log
             scale. 
         cosmic_ray_chance: Rate of cosmic ray impacts per qubit.
         cosmic_ray_min_radius: Minimum radius of cosmic ray effect.
         cosmic_ray_max_radius: Maximum radius of cosmic ray effect.
     """
-    baseline_error_means: dict[str, float]
-    baseline_error_stdevs: dict[str, float]
-    error_distributions_log: dict[str, bool]
+    error_means: dict[str, float]
+    error_stdevs: dict[str, float]
+    distributions_log: dict[str, bool]
     cosmic_ray_chance: float
     cosmic_ray_min_radius: float
     cosmic_ray_max_radius: float
 
     def __init__(
             self, 
-            baseline_error_means: dict[str, float],
-            baseline_error_stdevs: dict[str, float] = {
+            error_means: dict[str, float],
+            error_stdevs: dict[str, float] = {
                 'T1':0, 
                 'T2':0, 
                 'gate1_err':0, 
                 'gate2_err':0, 
                 'readout_err':0,
+                'erasure':0,
             },
-            error_distributions_log: dict[str, bool] = {
+            distributions_log: dict[str, bool] = {
                 'T1':False, 
                 'T2':False, 
                 'gate1_err':True, 
                 'gate2_err':True, 
                 'readout_err':True,
+                'erasure':True,
             },
             cosmic_ray_params: CosmicRayParams = GoogleRayParamsNoRandomRays,
         ):
         """Initialize.
 
         Args:
-            baseline_error_means: Mean error vals (gate errors, T1/T2).
-            baseline_error_stdevs: Standard deviations of error vals.
+            error_means: Mean error vals (gate errors, T1/T2).
+            error_stdevs: Standard deviations of error vals.
             error_distributions_log: Whether each error val is distributed on log
                 scale.
             cosmic_ray_params: Parameters for cosmic ray noise.
         """
-        self.baseline_error_means = baseline_error_means
-        self.baseline_error_stdevs = baseline_error_stdevs
-        self.error_distributions_log = error_distributions_log
+        self.error_means = error_means
+        self.error_stdevs = error_stdevs
+        self.distributions_log = distributions_log
         self.cosmic_ray_params = cosmic_ray_params
+
+def get_T1T2_gate_err(t1, t2, gate_time):
+    """TODO
+    """
+    p_x = max(0, 0.25 * (1 - np.exp(-gate_time / t1)))
+    p_y = p_x
+    p_z = max(0, 0.5 * (1 - np.exp(-gate_time / t2)) - p_x)
+    return p_x + p_y + p_z
 
 StandardIdenticalNoiseParams = CosmicRayNoiseParams(
     {
@@ -104,36 +115,40 @@ StandardIdenticalNoiseParams = CosmicRayNoiseParams(
         'T2':30e-6, 
         'gate1_err':-5, 
         'gate2_err':-4, 
-        'readout_err':-4
+        'readout_err':-4,
+        'erasure':0,
     },
     cosmic_ray_params=GoogleRayParams,
 )
 
 GoogleNoiseParams = CosmicRayNoiseParams(
     {
-        'T1':20e-6, 
+        'T1':20e-6,
         'T2':30e-6, 
-        'gate1_err':-4, # to give average gate error around 0.08%
-        'gate2_err':-2.5, # to give average gate error around 0.5%
-        'readout_err':-1.7 # to give average around 2%
+        'gate1_err':0.0008 - get_T1T2_gate_err(20e-6, 30e-6, 25e-9), # combined with T1/T2 errors, gives average gate error around 0.08%
+        'gate2_err':0.005 - get_T1T2_gate_err(20e-6, 30e-6, 35e-9), # to give average gate error around 0.5%
+        'readout_err':0.02 - get_T1T2_gate_err(20e-6, 30e-6, 500e-9), # to give average around 2%
+        'erasure':0,
     },
-    baseline_error_stdevs= {
+    error_stdevs= {
         'T1':2e-6,
         'T2':5e-6,
-        'gate1_err':0.1,
-        'gate2_err':0.1,
-        'readout_err':0.1,
+        'gate1_err':0.0005 * (0.0008 - get_T1T2_gate_err(20e-6, 30e-6, 25e-9))/0.0008,
+        'gate2_err':0.003 * (0.005 - get_T1T2_gate_err(20e-6, 30e-6, 35e-9))/0.005,
+        'readout_err':0.005 * (0.02 - get_T1T2_gate_err(20e-6, 30e-6, 500e-9))/0.02,
+        'erasure':0,
     },
     cosmic_ray_params=GoogleRayParams,
 )
 
 GoogleIdenticalNoiseParams = copy.deepcopy(GoogleNoiseParams)
-GoogleIdenticalNoiseParams.baseline_error_stdevs = {
+GoogleIdenticalNoiseParams.error_stdevs = {
     'T1':0,
     'T2':0,
     'gate1_err':0,
     'gate2_err':0,
     'readout_err':0,
+    'erasure':0,
 }
 
 GoogleNoiseParamsNoRandomRays = copy.deepcopy(GoogleNoiseParams)
@@ -160,8 +175,10 @@ class CosmicRay:
             center_coords: tuple[int, int],
             affected_qubits: list[int],
             radius: float,
-            init_strength: float,
-            model_type: RayModelType = RayModelType.LINEAR_ERR,
+            max_strength: float,
+            model_type: RayModelType = RayModelType.DIRECT,
+            tls_density: float = 1.0,
+            rng: np.random.Generator = np.random.default_rng(),
         ) -> None:
         """Create a cosmic ray.
         
@@ -171,19 +188,34 @@ class CosmicRay:
             affected_qubits: List of qubits that are affected (this is not used
                 internally, but saved for convenience).
         """
-        self.init_strength = init_strength 
-        self.current_strength = self.init_strength
+        self.max_strength = max_strength 
+        self.current_strength = self.max_strength
         self.time_alive = 0.0
-        self.halflife = 30e-3 # from https://www.nature.com/articles/s41567-021-01432-8
         self.center_coords = center_coords
         self.affected_qubits = affected_qubits
         self.radius = radius
+        self.model_type = model_type
+        if self.model_type == RayModelType.DIRECT:
+            self.halflife = 30e-3 # from https://www.nature.com/articles/s41567-021-01432-8
+        elif self.model_type == RayModelType.SCRAMBLING:
+            self.halflife = np.inf
+        else:
+            raise ValueError('Invalid RayModelType')
+        
+        selected_qs = rng.choice(affected_qubits, size=int(tls_density*len(affected_qubits)), replace=False)
+        self.qubit_impact_strengths = {q:0.0 for q in affected_qubits}
+        for q in selected_qs:
+            self.qubit_impact_strengths[q] = rng.random()*self.max_strength
+        # rescale impact strengths so that average is 0.5
+        # total_strength = sum(self.qubit_impact_strengths.values())
+        # for q in self.qubit_impact_strengths:
+        #     self.qubit_impact_strengths[q] *= 0.9 * len(affected_qubits) / total_strength
 
     def step(self, elapsed_time: float):
         """TODO
         """
         self.time_alive += elapsed_time
-        self.current_strength = self.init_strength * 0.5**(self.time_alive/self.halflife)
+        self.current_strength = self.max_strength * 0.5**(self.time_alive/self.halflife)
 
 class NoiseModel:
     """Simulate the evolution of physical qubit error rates over time, as they
@@ -225,6 +257,7 @@ class NoiseModel:
             'gate1_err':3/4,
             'gate2_err':15/16,
             'readout_err':1,
+            'erasure':1,
         }
 
         self.rng = np.random.default_rng(seed)
@@ -234,7 +267,8 @@ class NoiseModel:
         self.save_error_vals = save_error_vals
         self.error_val_history = []
 
-        self._error_vals = self._initialize_error_vals()
+        noise_params.set_patch_err_vals(patch, rng=self.rng)
+        self._error_vals = copy.deepcopy(patch.error_vals)
 
         self.active_cosmic_rays: list[CosmicRay] = []
         self.cosmic_ray_delete_threshold = 1e-5
@@ -337,8 +371,9 @@ class NoiseModel:
             center_coords=np.argwhere(self.qubit_layout == center_qubit)[0], 
             affected_qubits=affected_qubits, 
             radius=radius,
-            init_strength=self.noise_params.cosmic_ray_params.init_strength,
+            max_strength=self.noise_params.cosmic_ray_params.max_strength,
             model_type=self.noise_params.cosmic_ray_params.model,
+            rng=self.rng,
         )
         self.active_cosmic_rays.append(ray)
         self.event_history.append(('COSMIC_RAY', (center_qubit, affected_qubits)))
@@ -362,8 +397,10 @@ class NoiseModel:
             center_coords=coords, 
             affected_qubits=affected_qubits, 
             radius=radius,
-            init_strength=self.noise_params.cosmic_ray_params.init_strength,
+            max_strength=self.noise_params.cosmic_ray_params.max_strength,
             model_type=self.noise_params.cosmic_ray_params.model,
+            tls_density=self.noise_params.cosmic_ray_params.tls_density,
+            rng=self.rng,
             )
         self.active_cosmic_rays.append(ray)
         self.event_history.append(('COSMIC_RAY', (None, affected_qubits)))
@@ -425,14 +462,22 @@ class NoiseModel:
                 # decrease in error rates observed in Google paper (with
                 # sampling interval of 3us).
                 # TODO: use RayModelType to decide what to do here
-                coords = np.argwhere(self.qubit_layout == qubit)[0]
-                dist_from_center = np.sqrt((coords[0]-cosmic_ray.center_coords[0])**2 + (coords[1]-cosmic_ray.center_coords[1])**2)
-                scale_factor = ((cosmic_ray.radius - dist_from_center) / cosmic_ray.radius)
-                assert 0 <= scale_factor and scale_factor <= 1
-                t1_init = self._error_vals['T1'][qubit]
-                t1_worst = self._error_vals['T1'][qubit] * (1-cosmic_ray.current_strength)
-                scaled_t1 = -3e-6/np.log((1-scale_factor)*np.exp(-3e-6/t1_init) + scale_factor*np.exp(-3e-6/t1_worst))
-                actual_error_vals['T1'][qubit] = min(actual_error_vals['T1'][qubit], scaled_t1)
+                if cosmic_ray.model_type == RayModelType.DIRECT:
+                    coords = np.argwhere(self.qubit_layout == qubit)[0]
+                    dist_from_center = np.sqrt((coords[0]-cosmic_ray.center_coords[0])**2 + (coords[1]-cosmic_ray.center_coords[1])**2)
+                    scale_factor = ((cosmic_ray.radius - dist_from_center) / cosmic_ray.radius)
+                    assert 0 <= scale_factor and scale_factor <= 1
+                    t1_init = self._error_vals['T1'][qubit]
+                    t1_worst = self._error_vals['T1'][qubit] * (1-cosmic_ray.current_strength)
+                    if scale_factor == 0:
+                        actual_error_vals['T1'][qubit] = t1_init
+                    elif scale_factor == 1:
+                        actual_error_vals['T1'][qubit] = t1_worst
+                    else:
+                        scaled_t1 = -3e-6/np.log((1-scale_factor)*np.exp(-3e-6/t1_init) + scale_factor*(np.exp(-3e-6/t1_worst) if t1_worst > 0 else 0))
+                        actual_error_vals['T1'][qubit] = min(actual_error_vals['T1'][qubit], scaled_t1)
+                else:
+                    actual_error_vals['T1'][qubit] *= (1-cosmic_ray.qubit_impact_strengths[qubit])
 
         return actual_error_vals
 
@@ -445,56 +490,3 @@ class NoiseModel:
         for val, updated_vals in update_dict.items():
             self._error_vals[val] = self._error_vals[val] | updated_vals
         return self.get_error_val_dict()
-
-    def _initialize_error_vals(
-            self,
-        ) -> dict[str, dict[int | tuple[int, int], float]]:
-        """Sample initial noise values from Gaussian distributions described by
-        class attributes baseline_error_means and baseline_error_stdevs.
-
-        Returns:
-            Dictionary mapping error types to value assignments (for qubits or
-            pairs). 
-        """
-        error_vals = {
-            'T1': {q: self.rng.normal(
-                    self.noise_params.baseline_error_means['T1'],
-                    self.noise_params.baseline_error_stdevs['T1']
-                )
-                for q in range(self.num_qubits)
-            },
-            'T2': {q: self.rng.normal(
-                    self.noise_params.baseline_error_means['T2'],
-                    self.noise_params.baseline_error_stdevs['T2']
-                )
-                for q in range(self.num_qubits)
-            },
-            'readout_err': {q: self.rng.normal(
-                    self.noise_params.baseline_error_means['readout_err'],
-                    self.noise_params.baseline_error_stdevs['readout_err']
-                )
-                for q in range(self.num_qubits)
-            },
-            'gate1_err': {q: self.rng.normal(
-                    self.noise_params.baseline_error_means['gate1_err'],
-                    self.noise_params.baseline_error_stdevs['gate1_err']
-                )
-                for q in range(self.num_qubits)
-            },
-            'gate2_err': {qubit_pair: self.rng.normal(
-                    self.noise_params.baseline_error_means['gate2_err'],
-                    self.noise_params.baseline_error_stdevs['gate2_err']
-                )
-                for qubit_pair in self.qubit_pairs
-            },
-        }
-
-        for k,assignments in error_vals.items():
-            if self.noise_params.error_distributions_log[k]:
-                # apply exponent if mean/stdev values are on log scale
-                error_vals[k] = {q:10**v for q,v in assignments.items()}
-            # clip to min/max allowed
-            error_vals[k] = {q:np.clip(v, 0, self.error_max_vals[k])
-                             for q,v in error_vals[k].items()}
-
-        return error_vals

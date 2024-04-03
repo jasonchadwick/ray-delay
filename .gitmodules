@@ -1,0 +1,3 @@
+[submodule "stim_lattice_surgery"]
+	path = stim_lattice_surgery
+	url = git@github.com:jviszlai/stim_lattice_surgery.git

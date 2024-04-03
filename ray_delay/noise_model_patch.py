@@ -11,7 +11,7 @@ class NoiseModelPatch:
     def __init__(
             self, 
             patch: SurfaceCodePatch, 
-            noise_params: CosmicRayNoiseParams = GoogleNoiseParamsNoRandomRays.improve_noise_params(10),
+            noise_params: CosmicRayNoiseParams = GoogleNoiseParamsNoRandomRays.improve(10),
             noise_model: NoiseModel | None = None,
             seed: int | None = None,
         ):

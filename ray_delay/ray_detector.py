@@ -214,28 +214,178 @@ class RayImpactSimulator:
             self, 
             patch: NoiseModelPatch,
             spatial_window_size: int,
+            window_offline_radius: float,
             only_full_windows: bool = False,
         ):
         """Initialize the ray detection simulator.
 
         Args:
-            ray_detector_spec: The ray detector spec to use.
-            device: The layout of the device, in the form of a 2D list of Qubit
-                objects.    
+            patch: The NoiseModelPatch object to use.
             spatial_window_size: Number of qubits in each dimension of the
                 square spatial window.
+            window_offline_radius: Radius around window in which we turn off
+                qubits when we detect a ray.
             only_full_windows: If True, only return windows that are completely
                 filled with qubits. If False, return all windows that are at
                 least partially filled with qubits (such as windows on the edges
                 of a device patch).
+            rng: Seed or random number generator to use. If None, use the
+                default numpy random number generator.
         """
         self._patch = patch
         self._spatial_window_size = spatial_window_size
-        self._windows, self._qubit_to_window = self._initialize_windows(
+        self._windows, self._window_coords, self._window_offline_qubits, self._qubit_to_window = self._initialize_windows(
             spatial_window_size, 
+            window_offline_radius,
             only_full_windows
         )
         
+    def generate_detector_spec_v2(
+            self,
+            window_fpr: float | mpmath.mpf,
+            cycles_per_distillation: int,
+            temporal_window_size: int | None = None,
+            max_simulate_time: float = 30e-3,
+            decay_nsteps: int = 10,
+            save_detector_spec: bool = False,
+            ray_simulation_trials: int = 1,
+        ):
+        """Generate a RayDetectorSpec object for the given patch by simulating a
+        cosmic ray impact at the center of the patch and calculating the chances
+        that each qubit lies within a triggering detection window.
+
+        Args:
+            window_fpr: The desired false positive rate for every
+                window. If type is mpmath.mpf, this type will be used throughout
+                the computation. This will be more accurate for very low
+                probabilities, but will be slower to calculate.
+            cycles_per_distillation: The number of syndrome measurement rounds
+                per distillation cycle.
+            temporal_window_size: The number of syndrome measurement rounds to
+                consider when detecting cosmic rays. If None, use
+                cycles_per_distillation.
+            max_simulate_time: The maximum time to simulate the tail decay of
+                the ray.
+            decay_nsteps: The number of evenly-spaced steps to use when
+                simulating the decay of the ray.
+            save_detector_spec: If True, save RayDetectorSpec object to a file
+                via pickle.
+        """
+        # patch should be sufficiently large so that ray does not reach
+        # boundaries
+        assert len(self._patch.patch.device) > 2*self._patch.noise_model._noise_params.cosmic_ray_params.max_radius
+        assert len(self._patch.patch.device[0]) > 2*self._patch.noise_model._noise_params.cosmic_ray_params.max_radius
+
+        if temporal_window_size is None:
+            temporal_window_size = cycles_per_distillation
+
+        # simulate ray impact and decay
+        self._patch.reset()
+        baseline_fractions = np.mean(self._patch.patch.count_detection_events(10**6, return_full_data=True)[0], axis=0)
+        center_coords = (len(self._patch.patch.device) // 2, 
+                         len(self._patch.patch.device[0]) // 2)
+        ray_fractions = []
+        for time in np.linspace(0, max_simulate_time, decay_nsteps):
+            ray_fractions.append([])
+            for _ in range(ray_simulation_trials):
+                self._patch.reset()
+                self._patch.force_cosmic_ray_by_coords(center_coords)
+                self._patch.step(time)
+                ray_fractions[-1].append(np.mean(self._patch.patch.count_detection_events(10**6, return_full_data=True)[0], axis=0))
+        ray_fractions = np.mean(ray_fractions, axis=1)
+        assert ray_fractions.shape == (decay_nsteps, len(baseline_fractions))
+
+        syndrome_qubits = self._patch.patch.get_syndrome_qubits()
+        baseline_fractions_labeled = {q.idx: baseline_fractions[i] for i,q in enumerate(syndrome_qubits)}
+        ray_fractions_labeled = [{q.idx:r[i] for i,q in enumerate(syndrome_qubits)} for r in ray_fractions]
+
+        _, baseline_window_rates = self.calc_signal_chances(
+            baseline_fractions_labeled,
+            baseline_fractions_labeled,
+            1,
+            temporal_window_size,
+            window_fpr,
+        )
+        false_positive_rate = 1-np.prod(1-baseline_window_rates)
+
+        # calculate distance from center for each qubit
+        ancilla_distances = np.zeros(len(self._patch.patch.ancilla), dtype=float)
+        for i,qubit in enumerate(self._patch.patch.ancilla):
+            coords = qubit.coords
+            ancilla_distances[i] = np.sqrt((coords[0]-center_coords[0])**2 + (coords[1]-center_coords[1])**2)
+
+        unique_distances = []
+        qubits_per_distance = []
+        for i,dst in enumerate(ancilla_distances):
+            qubit = self._patch.patch.ancilla[i].idx
+            dst_rounded = np.round(dst, 2)
+            if dst_rounded not in unique_distances:
+                unique_distances.append(dst_rounded)
+                qubits_per_distance.append([qubit])
+            else:
+                qubits_per_distance[unique_distances.index(dst_rounded)].append(qubit)
+        qubits_per_distance = np.array(qubits_per_distance, dtype=object)[np.argsort(unique_distances)]
+        unique_distances = np.sort(unique_distances)
+
+        # first distillation signal chances
+        first_distillation_qubit_signal_rates, _ = self.calc_signal_chances(
+            baseline_fractions_labeled,
+            ray_fractions_labeled[0],
+            cycles_per_distillation,
+            temporal_window_size,
+            window_fpr,
+            individual_cycle_results=True,
+        )
+
+        first_distillation_avg_signal_rates_by_distance = np.zeros((cycles_per_distillation, len(unique_distances)), dtype=mpmath.mpf)
+        for k,dst in enumerate(unique_distances):
+            for cycle in range(cycles_per_distillation):
+                for q in qubits_per_distance[k]:
+                    first_distillation_avg_signal_rates_by_distance[cycle,k] += first_distillation_qubit_signal_rates[cycle][q]
+            first_distillation_avg_signal_rates_by_distance[:,k] /= len(qubits_per_distance[k])
+
+            # lower bound by average false positive rate
+            for cycle in range(cycles_per_distillation):
+                first_distillation_avg_signal_rates_by_distance[cycle,k] = np.maximum(first_distillation_avg_signal_rates_by_distance[cycle,k], false_positive_rate)
+
+        # decaying signal chances
+        decaying_avg_signal_rates_by_distance = np.zeros((decay_nsteps, len(unique_distances)), dtype=mpmath.mpf)
+        for i,ray_fraction in enumerate(ray_fractions_labeled):
+            qubit_signal_rates, _ = self.calc_signal_chances(
+                baseline_fractions_labeled,
+                ray_fraction,
+                1,
+                temporal_window_size,
+                window_fpr,
+            )
+        
+            for k,dst in enumerate(unique_distances):
+                for q in qubits_per_distance[k]:
+                    decaying_avg_signal_rates_by_distance[i,k] += qubit_signal_rates[q]
+                decaying_avg_signal_rates_by_distance[i,k] /= len(qubits_per_distance[k])
+
+        # lower bound by average false positive rate
+        for j in range(decay_nsteps):
+            for k in range(len(unique_distances)):
+                decaying_avg_signal_rates_by_distance[j,k] = np.maximum(decaying_avg_signal_rates_by_distance[j,k], false_positive_rate)
+
+        ray_detector_spec = RayDetectorSpec(
+            detector_spatial_window_size = self._spatial_window_size,
+            detector_temporal_window_size = temporal_window_size,
+            ray_params = self._patch.noise_model._noise_params.cosmic_ray_params,
+            detection_distances = unique_distances,
+            times_after_ray_impact = np.linspace(0, max_simulate_time, decay_nsteps),
+            first_distillation_signal_rates = first_distillation_avg_signal_rates_by_distance,
+            decaying_signal_rates = decaying_avg_signal_rates_by_distance,
+            baseline_signal_rate = float(false_positive_rate),
+        )
+
+        if save_detector_spec:
+            with open(f'data/ray_detector_spec_fpr_1e{int(np.round(np.log10(float(window_fpr))))}.pkl', 'wb') as f:
+                dill.dump(ray_detector_spec, f)
+
+        return ray_detector_spec
+
     def generate_detector_spec(
             self,
             window_fpr: float | mpmath.mpf,
@@ -425,15 +575,16 @@ class RayImpactSimulator:
     def _initialize_windows(
             self,
             spatial_window_size: int,
+            window_offline_radius: float,
             only_full_windows: bool = False,
-        ) -> tuple[list[list[int]], dict[int, list[int]]]:
+        ) -> tuple[list[list[int]], list[tuple[int, int]], list[list[int]], dict[int, list[int]]]:
         """Initialize spatial windows that we will use to detect cosmic rays.
         
         Args:
-            device: The layout of the device, in the form of a 2D list of Qubit
-                objects.
             spatial_window_size: Number of qubits in each dimension of the
                 square spatial window.
+            window_offline_radius: Radius around window in which we turn off
+                qubits when we detect a ray.
             only_full_windows: If True, only return windows that are completely
                 filled with qubits. If False, return all windows that are at
                 least partially filled with qubits (such as windows on the edges
@@ -450,21 +601,38 @@ class RayImpactSimulator:
         min_qubit_count = spatial_window_size**2 if only_full_windows else 1
 
         all_windows = []
-        qubit_to_windows = {q.idx: [] for q in self._patch.patch.ancilla}
+        window_coords = []
+        window_offline_qubits = []
+        qubit_to_windows = {q.idx: [] for q in self._patch.patch.all_qubits}
         for wr in range(window_rows):
             for wc in range(window_cols):
                 window_qubits = []
-                for r in range(wr, wr + spatial_window_size):
-                    for c in range(wc, wc + spatial_window_size):
-                        qb = self._patch.patch.device[2*r][2*c]
+                window_data_qubits = set()
+                coord_sum = (0, 0)
+                for r in range(2*wr, 2*(wr + spatial_window_size)-1):
+                    for c in range(2*wc, 2*(wc + spatial_window_size)-1):
+                        qb = self._patch.patch.device[r][c]
                         if isinstance(qb, MeasureQubit):
                             window_qubits.append(qb.idx)
-                            qubit_to_windows[qb.idx].append(len(all_windows))
+                            coord_sum = (coord_sum[0] + r, coord_sum[1] + c)
+                        elif isinstance(qb, Qubit):
+                            window_data_qubits.add(qb.idx)
                 if len(window_qubits) >= min_qubit_count:
                     all_windows.append(window_qubits)
-        return all_windows, qubit_to_windows
+                    for q in set(window_qubits) | window_data_qubits:
+                        qubit_to_windows[q].append(len(all_windows)-1)
 
-    def calc_signal_chance(
+                    center_coords = (int(coord_sum[0] / len(window_qubits)), int(coord_sum[1] / len(window_qubits)))
+                    window_coords.append(center_coords)
+
+                    qubits_in_radius = self._patch.patch.get_qubits_in_radius(window_offline_radius, center_coords=center_coords)
+                    window_offline_qubits.append(list(set(window_qubits) | window_data_qubits | set(qubits_in_radius)))
+
+        assert len(all_windows) == len(window_coords) == len(window_offline_qubits)
+
+        return all_windows, window_coords, window_offline_qubits, qubit_to_windows
+
+    def calc_total_signal_chance(
             self,
             baseline_syndrome_rates: dict[int, float],
             observed_syndrome_rates: dict[int, float],
@@ -485,25 +653,108 @@ class RayImpactSimulator:
                 consider when detecting cosmic rays.
             detection_fpr: The false positive rate for each window.
         """
+        _, cumulative_window_signal_rates = self.calc_signal_chances(
+            baseline_syndrome_rates,
+            observed_syndrome_rates,
+            num_cycles,
+            temporal_window_size,
+            detection_fpr,
+        )
+
+        return 1 - np.prod(1-cumulative_window_signal_rates)
+    
+    def calc_signal_chances(
+            self,
+            baseline_syndrome_rates: dict[int, float],
+            observed_syndrome_rates: dict[int, float],
+            num_cycles: int,
+            temporal_window_size: int,
+            detection_fpr: float | mpmath.mpf,
+            suppress_warnings: bool = False,
+            individual_cycle_results: bool = False,
+        ) -> tuple[dict[int, mpmath.mpf], dict[int, mpmath.mpf] | NDArray[mpmath.mpf]]:
+        """TODO
+
+        Args:
+            baseline_syndrome_rates: The syndrome rates for each measure qubit 
+                before the ray impact.
+            observed_syndrome_rates: The syndrome rates for each measure qubit 
+                after the ray impact.
+            num_cycles: The number of cycles to consider.
+            temporal_window_size: The number of syndrome measurement rounds
+                within a detection window.
+            detection_fpr: The false positive rate for each window (used to set
+                syndrome count trigger threshold).
+            suppress_warnings: If True, suppress warnings about detection
+                thresholds being 0 or 1.
+            individual_cycle_results: If True, return the signal rates for each
+                cycle instead of the cumulative signal rates.
+
+        Returns:
+            If individual_cycle_results is True:
+                qubit_signal_rates: A list of dictionaries, where each
+                    dictionary contains the signal rate for each qubit in a
+                    cycle.
+                window_signal_rates: A 2D array of shape (num_cycles,
+                    num_windows) containing the signal rate for each window in
+                    each cycle.
+            If individual_cycle_results is False:
+                cumulative_qubit_signal_rates: A dictionary containing the
+                    cumulative signal rate for each qubit over all cycles.
+                cumulative_window_signal_rates: A dictionary containing the
+                    cumulative signal rate for each window over all cycles.
+        """
+
+        stored_thresholds = np.zeros(len(self._windows), dtype=mpmath.mpf)
+        stored_long_term_detection_probs = np.zeros(len(self._windows), dtype=mpmath.mpf)
+
+        for k, window in enumerate(self._windows):
+            baseline_mean = np.mean([baseline_syndrome_rates[q] for q in window])
+            detection_threshold = mpmath_binom_ppf(1-detection_fpr, len(window)*temporal_window_size, baseline_mean)
+            stored_thresholds[k] = detection_threshold
+            if detection_threshold == 0 and not suppress_warnings:
+                raise ValueError('Detection threshold is 0. Decrease detection_fpr.')
+            elif detection_threshold == len(window)*temporal_window_size and not suppress_warnings:
+                raise ValueError('Detection threshold is 1. Increase detection_fpr.')
+
+            observed_mean = np.mean([observed_syndrome_rates[q] for q in window])
+            stored_long_term_detection_probs[k] = 1-mpmath_binom_cdf(detection_threshold, len(window)*temporal_window_size, observed_mean)
+
         window_signal_rates = np.zeros((num_cycles, len(self._windows)), dtype=mpmath.mpf)
         for cycle in range(num_cycles):
             for k, window in enumerate(self._windows):
                 baseline_mean = np.mean([baseline_syndrome_rates[q] for q in window])
                 observed_mean = np.mean([observed_syndrome_rates[q] for q in window])
-                detection_threshold = mpmath_binom_ppf(1-detection_fpr, len(window)*num_cycles, baseline_mean)
-                if detection_threshold == 0:
-                    raise ValueError('Detection threshold is 0. Decrease detection_fpr.')
-                elif detection_threshold == len(window)*num_cycles:
-                    raise ValueError('Detection threshold is 1. Increase detection_fpr.')
+                
+                detection_threshold = stored_thresholds[k]
+
                 if cycle <= temporal_window_size:
                     windowed_syndrome_rate = baseline_mean*(1-cycle/temporal_window_size) + observed_mean*(cycle/temporal_window_size)
+                    detection_prob = 1-mpmath_binom_cdf(detection_threshold, len(window)*temporal_window_size, windowed_syndrome_rate)
                 else:
-                    windowed_syndrome_rate = observed_mean
-                detection_prob = 1-mpmath_binom_cdf(detection_threshold, len(window)*num_cycles, windowed_syndrome_rate)
+                    detection_prob = stored_long_term_detection_probs[k]
+                    
                 window_signal_rates[cycle,k] = detection_prob
 
-        signal_rate = 1-np.prod(1-window_signal_rates)
-        return signal_rate
+        if individual_cycle_results:
+            qubit_no_signal_rates = [{idx:mpmath.mpf(1.0) for idx in range(len(self._patch.patch.all_qubits))} for _ in range(num_cycles)]
+            for cycle in range(num_cycles):
+                for k, window in enumerate(self._windows):
+                    signal_rate = window_signal_rates[cycle,k]
+                    for q in window:
+                        qubit_no_signal_rates[cycle][q] = qubit_no_signal_rates[cycle][q]*(1 - signal_rate)
+            qubit_signal_rates = [{idx:1-nsr for idx,nsr in qnsr.items()} for qnsr in qubit_no_signal_rates]
+            return qubit_signal_rates, window_signal_rates
+        else:
+            cumulative_window_signal_rates = 1-np.prod(1-window_signal_rates, axis=0)
+            _cumulative_qubit_no_signal_rates = {idx:mpmath.mpf(1.0) for idx in range(len(self._patch.patch.all_qubits))}
+            for k, window in enumerate(self._windows):
+                signal_rate = cumulative_window_signal_rates[k]
+                for q in self._window_offline_qubits[k]:
+                    _cumulative_qubit_no_signal_rates[q] = _cumulative_qubit_no_signal_rates[q]*(1 - signal_rate)
+            cumulative_qubit_signal_rates = {idx:1-nsr for idx,nsr in _cumulative_qubit_no_signal_rates.items()}
+
+            return cumulative_qubit_signal_rates, cumulative_window_signal_rates
     
     def find_num_cycles(
             self,
@@ -512,7 +763,7 @@ class RayImpactSimulator:
             desired_signal_rate: mpmath.mpf,
             temporal_window_size: int,
             detection_fpr: float,
-            ray_affected_qubits: list[int]
+            ray_affected_qubits: list[int],
         ) -> mpmath.mpf:
         """Calculate the chance that any window signals a detection within the
         first `num_cycles` cycles after a ray impact.
@@ -529,53 +780,120 @@ class RayImpactSimulator:
         """
         if self._spatial_window_size == 1:
             raise Exception('Cannot use find_num_cycles with spatial_window_size=1.')
-        
-        fully_affected_windows = []
-        for window_qubits in self._windows:
-            every_qubit_has_affected_data_qubit = True
-            for q in window_qubits:
-                if q in ray_affected_qubits:
-                    continue
-                num_affected_data = 0
-                for dq in self._patch.patch.qubit_name_dict[q].data_qubits:
-                    if dq is not None and dq.idx in ray_affected_qubits:
-                        num_affected_data += 1
-                if num_affected_data < 4:
-                    every_qubit_has_affected_data_qubit = False
-                    break
-            if every_qubit_has_affected_data_qubit:
-                fully_affected_windows.append(window_qubits)
 
-        print(fully_affected_windows, ray_affected_qubits)
+        num_cycles = 1
+        affected_qubit_signal_rates = np.zeros(len(ray_affected_qubits), dtype=mpmath.mpf)
 
-        # fully_affected_windows = [w for w in self._windows if all(q in ray_affected_qubits for q in w)]
+        while affected_qubit_signal_rates.min() < desired_signal_rate:
+            cumulative_qubit_signal_rates, _ = self.calc_signal_chances(
+                baseline_syndrome_rates,
+                observed_syndrome_rates,
+                num_cycles,
+                temporal_window_size,
+                detection_fpr,
+                suppress_warnings=True,
+            )
+            affected_qubit_signal_rates = np.array([cumulative_qubit_signal_rates[q] for q in ray_affected_qubits])
 
-        num_cycles = temporal_window_size
-        cumulative_window_signal_rates = np.zeros((len(fully_affected_windows)), dtype=mpmath.mpf)
-
-        while cumulative_window_signal_rates.min() < desired_signal_rate:
-            window_signal_rates = np.zeros((len(fully_affected_windows)), dtype=mpmath.mpf)
-            for k, window in enumerate(fully_affected_windows):
-                baseline_mean = np.mean([baseline_syndrome_rates[q] for q in window])
-                observed_mean = np.mean([observed_syndrome_rates[q] for q in window])
-                detection_threshold = mpmath_binom_ppf(1-detection_fpr, len(window)*num_cycles, baseline_mean)
-                if detection_threshold == 0:
-                    raise ValueError('Detection threshold is 0. Decrease detection_fpr.')
-                elif detection_threshold == len(window)*num_cycles:
-                    raise ValueError('Detection threshold is 1. Increase detection_fpr.')
-                if num_cycles <= temporal_window_size:
-                    windowed_syndrome_rate = baseline_mean*(1-num_cycles/temporal_window_size) + observed_mean*(num_cycles/temporal_window_size)
-                else:
-                    windowed_syndrome_rate = observed_mean
-                detection_prob = 1-mpmath_binom_cdf(detection_threshold, len(window)*num_cycles, windowed_syndrome_rate)
-                window_signal_rates[k] = detection_prob
-            
-            cumulative_window_signal_rates = 1 - (1 - cumulative_window_signal_rates)*(1 - window_signal_rates)
-            
-            if cumulative_window_signal_rates.min() >= desired_signal_rate:
+            if affected_qubit_signal_rates.min() >= desired_signal_rate:
                 return num_cycles
+            
+            if num_cycles > 100*temporal_window_size:
+                raise ValueError('Could not find a number of cycles that achieves the desired signal rate.')
 
             num_cycles += 1
+
+    def find_num_cycles_v2(
+            self,
+            baseline_syndrome_rates: dict[int, float],
+            observed_syndrome_rates: dict[int, float],
+            desired_signal_rate: mpmath.mpf,
+            temporal_window_size: int,
+            detection_fpr: float,
+            ray_affected_qubits: list[int],
+        ) -> mpmath.mpf:
+        """Calculate the chance that any window signals a detection within the
+        first `num_cycles` cycles after a ray impact.
+
+        Args:
+            baseline_syndrome_data: The syndrome rates for each measure qubit 
+                before the ray impact.
+            observed_syndrome_data: The syndrome rates for each measure qubit 
+                after the ray impact.
+            num_cycles: The number of cycles to consider.
+            temporal_window_size: The number of syndrome measurement rounds to
+                consider when detecting cosmic rays.
+            detection_fpr: The false positive rate for each window.
+        """
+        stored_thresholds = np.zeros(len(self._windows), dtype=mpmath.mpf)
+        stored_long_term_detection_probs = np.zeros(len(self._windows), dtype=mpmath.mpf)
+
+        for k, window in enumerate(self._windows):
+            baseline_mean = np.mean([baseline_syndrome_rates[q] for q in window])
+            detection_threshold = mpmath_binom_ppf(1-detection_fpr, len(window)*temporal_window_size, baseline_mean)
+            stored_thresholds[k] = detection_threshold
+
+            observed_mean = np.mean([observed_syndrome_rates[q] for q in window])
+            stored_long_term_detection_probs[k] = 1-mpmath_binom_cdf(detection_threshold, len(window)*temporal_window_size, observed_mean)
+
+        cumulative_window_signal_rates = np.zeros(len(self._windows), dtype=mpmath.mpf)
+        cumulative_affected_qubit_signal_rates = np.zeros(len(ray_affected_qubits), dtype=mpmath.mpf)
+        cycle = 1
+        while cumulative_affected_qubit_signal_rates.min() < desired_signal_rate:
+            window_signal_rates = np.zeros(len(self._windows), dtype=mpmath.mpf)
+            for k, window in enumerate(self._windows):
+                detection_threshold = stored_thresholds[k]
+                if cycle <= temporal_window_size:
+                    windowed_syndrome_rate = baseline_mean*(1-cycle/temporal_window_size) + observed_mean*(cycle/temporal_window_size)
+                    detection_prob = 1-mpmath_binom_cdf(detection_threshold, len(window)*temporal_window_size, windowed_syndrome_rate)
+                else:
+                    detection_prob = stored_long_term_detection_probs[k]
+                
+                window_signal_rates[k] = detection_prob
+
+            cumulative_window_signal_rates = 1-(1-cumulative_window_signal_rates)*(1-window_signal_rates)
+            affected_qubit_no_signal_rates = np.ones(len(ray_affected_qubits), dtype=mpmath.mpf)
+            for k, window in enumerate(self._windows):
+                signal_rate = cumulative_window_signal_rates[k]
+                for q in self._window_offline_qubits[k]:
+                    if q in ray_affected_qubits:
+                        affected_qubit_no_signal_rates[ray_affected_qubits.index(q)] *= (1-signal_rate)
+            cumulative_affected_qubit_signal_rates = 1 - (1-cumulative_affected_qubit_signal_rates)*affected_qubit_no_signal_rates
+
+            if cumulative_affected_qubit_signal_rates.min() >= desired_signal_rate:
+                return cycle
+            
+            if cycle > 1000*temporal_window_size:
+                return np.inf
+                # raise ValueError('Could not find a number of cycles that achieves the desired signal rate.')
+
+            cycle += 1
+
+    def false_positive_rate(
+            self,
+            baseline_syndrome_rates: dict[int, float],
+            num_cycles: int,
+            temporal_window_size: int,
+            detection_fpr: float,
+        ):
+        """Calculate patch-wide chance of a false positive detection within
+        num_cycles cycles.
+        
+        Args:
+            baseline_syndrome_data: The syndrome rates for each measure qubit 
+                before the ray impact.
+            num_cycles: The number of cycles to consider.
+            temporal_window_size: The number of syndrome measurement rounds to
+                consider when detecting cosmic rays.
+            detection_fpr: The false positive rate for each window.
+        """
+        return self.calc_total_signal_chance(
+            baseline_syndrome_rates,
+            baseline_syndrome_rates,
+            num_cycles,
+            temporal_window_size,
+            detection_fpr,
+        )
 
 class RayDetector:
     """Detects cosmic ray impacts on a surface code patch using syndrome

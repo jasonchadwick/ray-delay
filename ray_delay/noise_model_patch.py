@@ -26,7 +26,6 @@ class NoiseModelPatch:
                 None.
         """
         self.patch = patch
-        self.noise_params = noise_params
         if noise_model is not None:
             self.noise_model = noise_model
         else:

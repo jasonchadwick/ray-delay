@@ -25,6 +25,7 @@ class MagicStateFactory:
             cycle_time: float | None = None,
             cache_cycles_per_distillation: bool = False,
             cache_filename: str | None = None,
+            rng: int | np.random.Generator | None = None,
         ):
         """Initializes the factory.
 
@@ -42,11 +43,20 @@ class MagicStateFactory:
             cache_filename: Filename to use for caching solutions to 
                 _cycles_per_distillation(). If None, will not load or save
                 cache.
+            rng: Seed for the random number generator, or a numpy random number
+                generator. If None, will use the default numpy random number
+                generator.
         """
         self.dx = dx
         self.dz = dz
         self.dm = dm
         self.patch_offline_duration = patch_offline_duration
+
+        if rng is None:
+            rng = np.random.default_rng()
+        elif isinstance(rng, int):
+            rng = np.random.default_rng(rng)
+        self.rng = rng
 
         num_rows = 3
         num_cols = 5
@@ -94,6 +104,8 @@ class MagicStateFactory:
 
         self._cache_cycles_per_distillation = cache_cycles_per_distillation
         self.cache_filename = cache_filename
+        self.cache_queries = 0
+        self.cache_hits = 0
         self._cycles_per_distillation_cache = {}
         self.load_cache()
 
@@ -134,7 +146,7 @@ class MagicStateFactory:
 
     def calculate_avg_overhead_per_ray(
             self,
-            ray_detector_spec: RayDetectorSpec | None,
+            ray_detector_spec: RayDetectorSpec,
             num_rays: int,
             num_distributions: int = 10,
             prob_cutoff: float = 1e-7,
@@ -143,10 +155,11 @@ class MagicStateFactory:
         """Simulate the impact of a number of cosmic rays on the factory
 
         TODO: rays centered just outside of factory?
+        TODO: false positives
         
         Args:
             ray_detector_spec: Contains information about ray and detector
-                behavior. If None, consider ideal detection.
+                behavior.
             num_rays: Number of ray impacts to simulate.
             num_distributions: Number of qubit detection distributions to sample
                 for each ray impact.
@@ -169,8 +182,12 @@ class MagicStateFactory:
             qubit_detection_chances = ray_result[1]
             assert np.all(qubit_detection_chances >= 0) and np.all(qubit_detection_chances <= 1), (qubit_detection_chances.min(), qubit_detection_chances.max())
 
-            # qubits_offline_list, distribution_chances = qc_utils.stats.get_most_probable_bitstrings(qubit_detection_chances, 10, probability_threshold=1e-3)
-            qubits_offline_array = np.random.rand(num_distributions, len(qubit_detection_chances)) < qubit_detection_chances[None, :][[0]*num_distributions]
+            # qubits_offline_list, distribution_chances =
+            # qc_utils.stats.get_most_probable_bitstrings(qubit_detection_chances,
+            # 10, probability_threshold=1e-3)
+            qubits_offline_most_likely = qubit_detection_chances > 0.5
+            qubits_offline_array = self.rng.random((num_distributions-1, len(qubit_detection_chances))) < qubit_detection_chances[None, :][[0]*(num_distributions-1)]
+            qubits_offline_array = np.concatenate([qubits_offline_array, qubits_offline_most_likely[None, :]])
             
             time_overhead = 0.0
             total_prob = 0
@@ -195,75 +212,6 @@ class MagicStateFactory:
                 time_overheads.append(time_overhead)
             offline_chances[-1] /= total_prob
 
-            # qubits_offline_list, distribution_chances = qc_utils.stats.get_most_probable_bitstrings(qubit_detection_chances, num_distributions, probability_threshold=prob_cutoff)
-            # if len(qubits_offline_list) == num_distributions:
-            #     print('Warning: did not find all distributions above probability cutoff. Smallest probability:', distribution_chances[-1])
-
-            # time_overhead = 0.0
-            # total_prob = 0
-            # offline_chances.append(0.0)
-            # for i,qubits_offline in enumerate(qubits_offline_list):
-            #     distribution_chance = distribution_chances[i]
-            #     if distribution_chance < prob_cutoff:
-            #         continue
-            #     self.physical_qubit_offline_time_remaining = qubits_offline.astype(float)
-            #     distillation_cycles = self._cycles_per_distillation()
-            #     if distillation_cycles is None:
-            #         offline_chances[-1] += distribution_chance
-            #     else:
-            #         time_overhead += distillation_cycles / baseline_cycles * distribution_chance
-            #     total_prob += distribution_chance
-            # assert total_prob > 0 and total_prob < 1, total_prob
-            # working_total_prob = total_prob - offline_chances[-1]
-            # if working_total_prob > 0:
-            #     time_overhead /= working_total_prob
-            #     time_overheads.append(time_overhead)
-            # offline_chances[-1] /= total_prob
-
-            # qubits_offline_init = np.random.random(len(qubit_detection_chances)) < qubit_detection_chances
-            # qubits_offline_array = np.zeros((num_distributions, len(qubit_detection_chances)), bool)
-            # qubits_offline_array[0] = qubits_offline_init
-
-            # distribution_chances = np.zeros(num_distributions)
-            # distribution_chances[0] = np.prod(qubit_detection_chances[qubits_offline_init]) * np.prod(1-qubit_detection_chances[~qubits_offline_init])
-
-            # time_overhead = 0.0
-            # total_prob = 0
-            # num_dist_changes = 0
-            # offline_chances.append(0.0)
-            # for i in range(num_distributions):
-            #     qubits_offline = qubits_offline_array[i]
-            #     distribution_chance = distribution_chances[i]
-
-            #     self.physical_qubit_offline_time_remaining = qubits_offline.astype(float)
-            #     distillation_cycles = self._cycles_per_distillation()
-
-            #     if distillation_cycles is None:
-            #         offline_chances[-1] += distribution_chance
-            #     else:
-            #         time_overhead += distillation_cycles / baseline_cycles * distribution_chance
-            #     total_prob += distribution_chance
-
-            #     # get next bitstring via Metropolis-Hastings
-            #     if i < num_distributions-1:
-            #         qubits_offline_new = qubits_offline.copy()
-            #         qubit_idx = np.random.randint(len(qubit_detection_chances))
-            #         qubits_offline_new[qubit_idx] = not qubits_offline_new[qubit_idx]
-            #         distribution_chance_new = np.prod(qubit_detection_chances[qubits_offline_new]) * np.prod(1-qubit_detection_chances[~qubits_offline_new])
-            #         alpha = distribution_chance_new / distribution_chance
-            #         if np.random.random() < alpha:
-            #             qubits_offline_array[i+1] = qubits_offline_new
-            #             distribution_chances[i+1] = distribution_chance_new
-            #             num_dist_changes += 1
-            #         else:
-            #             qubits_offline_array[i+1] = qubits_offline
-            #             distribution_chances[i+1] = distribution_chance
-            # print(num_dist_changes)
-            # working_total_prob = total_prob - offline_chances[-1]
-            # if working_total_prob > 0:
-            #     time_overhead /= working_total_prob
-            #     time_overheads.append(time_overhead)
-            # offline_chances[-1] /= total_prob
         self._reset()
         if save_cache:
             self.save_cache()
@@ -343,7 +291,6 @@ class MagicStateFactory:
             ray_detector_spec: RayDetectorSpec,
             patch_offline_time: float,
             use_mpmath: bool = True,
-            rng_seed: int | None = None,
         ):
         """Simulate the performance of the factory over a number of rounds, with
         cosmic rays.
@@ -362,8 +309,6 @@ class MagicStateFactory:
             TODO
         """
         self._reset()
-
-        rng = np.random.default_rng(rng_seed)
 
         ray_remove_time = 5*ray_detector_spec.ray_halflife
 
@@ -404,10 +349,10 @@ class MagicStateFactory:
             time_per_distillation = cycles_per_distillation * self.cycle_time + wait_time
 
             # generate new cosmic rays
-            num_cosmic_rays = rng.poisson(ray_incidence_rate * time_per_distillation * self.num_phys_qubits)
+            num_cosmic_rays = self.rng.poisson(ray_incidence_rate * time_per_distillation * self.num_phys_qubits)
             new_rays_this_round = []
             for i in range(num_cosmic_rays):
-                center_qubit = rng.choice(np.arange(self.num_phys_qubits))
+                center_qubit = self.rng.choice(np.arange(self.num_phys_qubits))
                 event_history.append(('RAY', center_qubit, elapsed_time, distillations_remaining))
                 new_rays_this_round.append((elapsed_time, center_qubit))
 
@@ -426,7 +371,7 @@ class MagicStateFactory:
             # distillation and turn patches offline. Note: patches that are
             # already offline can still be triggered again; this will reset
             # their offline time.
-            patch_signal_decisions = rng.random(self.num_patches) < patch_signal_chances
+            patch_signal_decisions = self.rng.random(self.num_patches) < patch_signal_chances
             if np.any(patch_signal_decisions):
                 for p in np.where(patch_signal_decisions)[0]:
                     # record event if patch was not already offline
@@ -450,7 +395,6 @@ class MagicStateFactory:
             num_rays: int | None = None,
             use_mpmath: bool = False,
             rng_seed: int | None = None,
-            rng: np.random.Generator | None = None,
         ):
         """Simulate the detection of a number of cosmic rays on the factory. Can
         be used to calculate the average overhead for the factory.
@@ -477,9 +421,7 @@ class MagicStateFactory:
         if num_rays is None or num_rays >= self.num_phys_qubits:
             impacted_qubits = np.arange(self.num_phys_qubits)
         else:
-            if rng is None:
-                rng = np.random.default_rng(rng_seed)
-            impacted_qubits = rng.choice(np.arange(self.num_phys_qubits), num_rays, replace=False)
+            impacted_qubits = self.rng.choice(np.arange(self.num_phys_qubits), num_rays, replace=False)
 
         for q in impacted_qubits:
             qubit_detection_chances = self._calc_qubit_offline_chances_in_first_distillation(ray_detector_spec, q, use_mpmath=use_mpmath)
@@ -652,6 +594,7 @@ class Redundant15To1(MagicStateFactory):
             redundant_top_routing_space: int = 0,
             redundant_bot_routing_space: int = 0,
             mapping_mode: str = 'simple',
+            rng: int | np.random.Generator | None = None,
         ):
         """Initializes the factory, using a layout from litinski_magic_2019.
 
@@ -678,6 +621,9 @@ class Redundant15To1(MagicStateFactory):
                 patches into a new configuration, but does not fully optimize
                 the new configuration for cycle cost. Method 'rearrange_full'
                 fully optimizes the new configuration for cycle cost.
+            rng: Seed for the random number generator, or a numpy random number
+                generator. If None, will use the default numpy random number
+                generator.
         """
         super().__init__(
             dx, 
@@ -687,6 +633,7 @@ class Redundant15To1(MagicStateFactory):
             cycle_time, 
             cache_cycles_per_distillation,
             f'data/mapping_cache_{mapping_mode}.pkl',
+            rng,
         )
 
         self.patch_offline_duration = patch_offline_duration
@@ -740,12 +687,18 @@ class Redundant15To1(MagicStateFactory):
 
         self.mapping_mode = mapping_mode
 
+        self._phys_qubit_patch_mapping_cache = dict()
+
     def _get_phys_qubit_patch_mapping(
             self,
             wide_columns: list[bool],
         ):
         """TODO
         """
+        cache_key = tuple(wide_columns)
+        if cache_key in self._phys_qubit_patch_mapping_cache:
+            return self._phys_qubit_patch_mapping_cache[cache_key]
+
         col_widths = np.array([self.dx if wide_columns[i] else self.dz for i in range(self.patch_indices.shape[1])])
         patch_idx_from_physical_qubit_idx = np.full(self.num_phys_qubits, -1, dtype=int)
         physical_qubits_from_patch_idx = [[] for _ in range(self.num_patches)]
@@ -761,6 +714,8 @@ class Redundant15To1(MagicStateFactory):
                         if phys_idx != -1:
                             patch_idx_from_physical_qubit_idx[phys_idx] = self.patch_indices[row, col]
                             physical_qubits_from_patch_idx[self.patch_indices[row, col]].append(phys_idx)
+
+        self._phys_qubit_patch_mapping_cache[cache_key] = patch_idx_from_physical_qubit_idx, physical_qubits_from_patch_idx
         return patch_idx_from_physical_qubit_idx, physical_qubits_from_patch_idx
     
     def _get_patches_online(
@@ -865,12 +820,15 @@ class Redundant15To1(MagicStateFactory):
 
             patches_online = np.zeros(self.num_patches, bool)
             for p in range(self.num_patches):
+                # this is currently the performance bottleneck...
                 patches_online[p] = np.all(physical_qubits_online[physical_qubits_from_patch_idx[p]])
             online_patch_indices = np.where(patches_online)[0]
             online_wide_patches = [i for i in self.patch_indices[:,chosen_wide_column] if patches_online[i]]
 
+            self.cache_queries += 1
             current_optimization_key = (tuple(wide_columns), tuple(patches_online))
             if current_optimization_key in self._cycles_per_distillation_cache:
+                self.cache_hits += 1
                 cycle_count = self._cycles_per_distillation_cache[(tuple(wide_columns), tuple(patches_online))]
                 if cycle_count is not None and (best_cycle_count is None or cycle_count < best_cycle_count):
                     best_cycle_count = cycle_count

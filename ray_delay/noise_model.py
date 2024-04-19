@@ -21,6 +21,8 @@ class RayModelType(Enum):
     """
     DIRECT = 0
     SCRAMBLING = 1
+    CONSTANT = 2
+    SCRAMBLING_AVG = 3
 
 @dataclass
 class CosmicRayParams:
@@ -62,9 +64,7 @@ class CosmicRayNoiseParams(NoiseParams):
     error_means: dict[str, float]
     error_stdevs: dict[str, float]
     distributions_log: dict[str, bool]
-    cosmic_ray_chance: float
-    cosmic_ray_min_radius: float
-    cosmic_ray_max_radius: float
+    cosmic_ray_params: CosmicRayParams
 
     def __init__(
             self, 
@@ -195,9 +195,9 @@ class CosmicRay:
         self.affected_qubits = affected_qubits
         self.radius = radius
         self.model_type = model_type
-        if self.model_type == RayModelType.DIRECT:
+        if self.model_type == RayModelType.DIRECT or self.model_type == RayModelType.CONSTANT:
             self.halflife = 30e-3 # from https://www.nature.com/articles/s41567-021-01432-8
-        elif self.model_type == RayModelType.SCRAMBLING:
+        elif self.model_type == RayModelType.SCRAMBLING or self.model_type == RayModelType.SCRAMBLING_AVG:
             self.halflife = np.inf
         else:
             raise ValueError('Invalid RayModelType')
@@ -249,7 +249,7 @@ class NoiseModel:
              for row in patch.device],
             int
         )
-        self.noise_params = noise_params
+        self._noise_params = noise_params
 
         self.error_max_vals = {
             'T1':np.inf,
@@ -267,7 +267,7 @@ class NoiseModel:
         self.save_error_vals = save_error_vals
         self.error_val_history = []
 
-        noise_params.set_patch_err_vals(patch, rng=self.rng)
+        self._noise_params.set_patch_err_vals(patch, rng=self.rng)
         self._error_vals = copy.deepcopy(patch.error_vals)
 
         self.active_cosmic_rays: list[CosmicRay] = []
@@ -303,7 +303,7 @@ class NoiseModel:
 
         # step cosmic rays
         self.step_cosmic_rays(elapsed_time)
-        if self.noise_params.cosmic_ray_params.chance_per_qubit > 0:
+        if self._noise_params.cosmic_ray_params.chance_per_qubit > 0:
             self.randomly_add_cosmic_rays(elapsed_time)
 
         error_val_dict = self.get_error_val_dict()
@@ -338,9 +338,9 @@ class NoiseModel:
             roll = self.rng.random()
             for i in range(max_rays_added+1):
                 if i == max_rays_added:
-                    prob = 1 - scipy.stats.poisson(self.noise_params.cosmic_ray_params.chance_per_qubit*elapsed_time).cdf(i-1)
+                    prob = 1 - scipy.stats.poisson(self._noise_params.cosmic_ray_params.chance_per_qubit*elapsed_time).cdf(i-1)
                 else:
-                    prob = scipy.stats.poisson(self.noise_params.cosmic_ray_params.chance_per_qubit*elapsed_time).cdf(i)
+                    prob = scipy.stats.poisson(self._noise_params.cosmic_ray_params.chance_per_qubit*elapsed_time).cdf(i)
                 if roll < prob:
                     num_rays_added = i
                     break
@@ -348,7 +348,7 @@ class NoiseModel:
             for i in range(num_rays_added):
                 ray = self.add_cosmic_ray(
                     qubit, 
-                    self.rng.random()*(self.noise_params.cosmic_ray_params.max_radius - self.noise_params.cosmic_ray_params.min_radius) + self.noise_params.cosmic_ray_params.min_radius,
+                    self.rng.random()*(self._noise_params.cosmic_ray_params.max_radius - self._noise_params.cosmic_ray_params.min_radius) + self._noise_params.cosmic_ray_params.min_radius,
                 )
                 ray_elapsed_time = self.rng.random() * elapsed_time
                 ray.step(ray_elapsed_time)
@@ -365,14 +365,14 @@ class NoiseModel:
             radius: Radius of cosmic ray (in terms of qubit spacing).
         """
         if radius is None:
-            radius = self.rng.random()*(self.noise_params.cosmic_ray_params.max_radius - self.noise_params.cosmic_ray_params.min_radius) + self.noise_params.cosmic_ray_params.min_radius
+            radius = self.rng.random()*(self._noise_params.cosmic_ray_params.max_radius - self._noise_params.cosmic_ray_params.min_radius) + self._noise_params.cosmic_ray_params.min_radius
         affected_qubits = self.get_qubits_in_radius(radius, center_qubit=center_qubit)
         ray = CosmicRay(
             center_coords=np.argwhere(self.qubit_layout == center_qubit)[0], 
             affected_qubits=affected_qubits, 
             radius=radius,
-            max_strength=self.noise_params.cosmic_ray_params.max_strength,
-            model_type=self.noise_params.cosmic_ray_params.model,
+            max_strength=self._noise_params.cosmic_ray_params.max_strength,
+            model_type=self._noise_params.cosmic_ray_params.model,
             rng=self.rng,
         )
         self.active_cosmic_rays.append(ray)
@@ -391,15 +391,15 @@ class NoiseModel:
             radius: Radius of cosmic ray (in terms of qubit spacing).
         """
         if radius is None:
-            radius = self.rng.random()*(self.noise_params.cosmic_ray_params.max_radius - self.noise_params.cosmic_ray_params.min_radius) + self.noise_params.cosmic_ray_params.min_radius
+            radius = self.rng.random()*(self._noise_params.cosmic_ray_params.max_radius - self._noise_params.cosmic_ray_params.min_radius) + self._noise_params.cosmic_ray_params.min_radius
         affected_qubits = self.get_qubits_in_radius(radius, center_coords=coords)
         ray = CosmicRay(
             center_coords=coords, 
             affected_qubits=affected_qubits, 
             radius=radius,
-            max_strength=self.noise_params.cosmic_ray_params.max_strength,
-            model_type=self.noise_params.cosmic_ray_params.model,
-            tls_density=self.noise_params.cosmic_ray_params.tls_density,
+            max_strength=self._noise_params.cosmic_ray_params.max_strength,
+            model_type=self._noise_params.cosmic_ray_params.model,
+            tls_density=self._noise_params.cosmic_ray_params.tls_density,
             rng=self.rng,
             )
         self.active_cosmic_rays.append(ray)
@@ -431,6 +431,7 @@ class NoiseModel:
         if center_coords is None:
             qubits.append(center_qubit)
             center_coords = np.argwhere(self.qubit_layout == center_qubit)[0]
+        assert center_coords is not None
         for r_offset in range(-int(np.floor(radius)), int(np.ceil(radius))+1):
             for c_offset in range(-int(np.floor(radius)), int(np.ceil(radius))+1):
                 if (np.sqrt(r_offset**2 + c_offset**2) < radius
@@ -476,8 +477,12 @@ class NoiseModel:
                     else:
                         scaled_t1 = -3e-6/np.log((1-scale_factor)*np.exp(-3e-6/t1_init) + scale_factor*(np.exp(-3e-6/t1_worst) if t1_worst > 0 else 0))
                         actual_error_vals['T1'][qubit] = min(actual_error_vals['T1'][qubit], scaled_t1)
-                else:
+                elif cosmic_ray.model_type == RayModelType.SCRAMBLING:
                     actual_error_vals['T1'][qubit] *= (1-cosmic_ray.qubit_impact_strengths[qubit])
+                elif cosmic_ray.model_type == RayModelType.SCRAMBLING_AVG:
+                    actual_error_vals['T1'][qubit] = self._error_vals['T1'][qubit]*(1-cosmic_ray.max_strength/2)
+                else:
+                    actual_error_vals['T1'][qubit] = self._error_vals['T1'][qubit]*(1-cosmic_ray.current_strength)
 
         return actual_error_vals
 

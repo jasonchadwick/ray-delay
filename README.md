@@ -1,6 +1,6 @@
 # ray-delay
 
-Code accompanying "Averting multi-qubit burst errors in surface code magic state factories".
+Code accompanying "Averting multi-qubit burst errors in surface code magic state factories". Repository will be archived upon publication of paper.
 
 ## Dependencies
 

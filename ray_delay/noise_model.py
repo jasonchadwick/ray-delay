@@ -75,7 +75,6 @@ class CosmicRayNoiseParams(NoiseParams):
                 'gate1_err':0, 
                 'gate2_err':0, 
                 'readout_err':0,
-                'erasure':0,
             },
             distributions_log: dict[str, bool] = {
                 'T1':False, 
@@ -83,7 +82,6 @@ class CosmicRayNoiseParams(NoiseParams):
                 'gate1_err':True, 
                 'gate2_err':True, 
                 'readout_err':True,
-                'erasure':True,
             },
             cosmic_ray_params: CosmicRayParams = GoogleRayParamsNoRandomRays,
         ):
@@ -116,7 +114,6 @@ StandardIdenticalNoiseParams = CosmicRayNoiseParams(
         'gate1_err':-5, 
         'gate2_err':-4, 
         'readout_err':-4,
-        'erasure':0,
     },
     cosmic_ray_params=GoogleRayParams,
 )
@@ -128,7 +125,6 @@ GoogleNoiseParams = CosmicRayNoiseParams(
         'gate1_err':0.0008 - get_T1T2_gate_err(20e-6, 30e-6, 25e-9), # combined with T1/T2 errors, gives average gate error around 0.08%
         'gate2_err':0.005 - get_T1T2_gate_err(20e-6, 30e-6, 35e-9), # to give average gate error around 0.5%
         'readout_err':0.02 - get_T1T2_gate_err(20e-6, 30e-6, 500e-9), # to give average around 2%
-        'erasure':0,
     },
     error_stdevs= {
         'T1':2e-6,
@@ -136,7 +132,6 @@ GoogleNoiseParams = CosmicRayNoiseParams(
         'gate1_err':0.0005 * (0.0008 - get_T1T2_gate_err(20e-6, 30e-6, 25e-9))/0.0008,
         'gate2_err':0.003 * (0.005 - get_T1T2_gate_err(20e-6, 30e-6, 35e-9))/0.005,
         'readout_err':0.005 * (0.02 - get_T1T2_gate_err(20e-6, 30e-6, 500e-9))/0.02,
-        'erasure':0,
     },
     cosmic_ray_params=GoogleRayParams,
 )
@@ -148,7 +143,6 @@ GoogleIdenticalNoiseParams.error_stdevs = {
     'gate1_err':0,
     'gate2_err':0,
     'readout_err':0,
-    'erasure':0,
 }
 
 GoogleNoiseParamsNoRandomRays = copy.deepcopy(GoogleNoiseParams)
@@ -257,7 +251,6 @@ class NoiseModel:
             'gate1_err':3/4,
             'gate2_err':15/16,
             'readout_err':1,
-            'erasure':1,
         }
 
         self.rng = np.random.default_rng(seed)

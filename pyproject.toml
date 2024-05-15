@@ -16,8 +16,8 @@ pymatching = "^2.1.0"
 ipykernel = "^6.28.0"
 qiskit = "^0.45.1"
 qutip = "^4.7.3"
-qc-utils = {git = "https://github.com/jasonchadwick/qc_utils.git"}
-stim-surface-code = {git = "https://github.com/jasonchadwick/stim_surface_code.git"}
+qc-utils = {git = "https://github.com/jasonchadwick/qc_utils.git", rev="1066c83"}
+stim-surface-code = {git = "https://github.com/jasonchadwick/stim_surface_code.git", rev="ede9f17"}
 mpmath = "^1.3.0"
 scikit-learn = "^1.3.2"
 viztracer = "^0.16.1"
